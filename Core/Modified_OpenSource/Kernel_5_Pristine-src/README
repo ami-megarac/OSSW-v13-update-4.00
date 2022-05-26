@@ -1,0 +1,4 @@
+Because github space size limit < 100M,
+split kernel source tar file to 3 parts.
+Merge method:
+cat linux-5.4.124.tar.bz2.part1 linux-5.4.124.tar.bz2.part2 linux-5.4.124.tar.bz2.part3 > linux-5.4.124.tar.bz2
