@@ -1,0 +1,129 @@
+diff -ruNa linux/drivers/i2c/i2c-core-base.c linux_n/drivers/i2c/i2c-core-base.c
+--- linux/drivers/i2c/i2c-core-base.c	2022-01-27 16:36:24.098473000 +0800
++++ linux_n/drivers/i2c/i2c-core-base.c	2022-01-26 16:58:13.158787000 +0800
+@@ -65,6 +65,9 @@
+ static DEFINE_STATIC_KEY_FALSE(i2c_trace_msg_key);
+ static bool is_registered;
+ 
++bool g_enable_mux_disconnect[MAX_I2C_ADAPTERS];
++EXPORT_SYMBOL(g_enable_mux_disconnect);
++
+ int i2c_transfer_trace_reg(void)
+ {
+ 	static_branch_inc(&i2c_trace_msg_key);
+diff -ruNa linux/drivers/i2c/i2c-dev.c linux_n/drivers/i2c/i2c-dev.c
+--- linux/drivers/i2c/i2c-dev.c	2022-01-27 16:36:24.098473000 +0800
++++ linux_n/drivers/i2c/i2c-dev.c	2022-01-27 11:45:45.086843000 +0800
+@@ -43,7 +43,11 @@
+ 	struct device dev;
+ 	struct cdev cdev;
+ };
+-
++typedef struct _I2cMuxCtrlFlagInfo_T
++{
++	u8 RootBusNum;
++	bool State;
++} I2cMuxCtrlFlagInfo_T;
+ #define I2C_MINORS	(MINORMASK + 1)
+ static LIST_HEAD(i2c_dev_list);
+ static DEFINE_SPINLOCK(i2c_dev_list_lock);
+@@ -484,6 +488,14 @@
+ 		 */
+ 		client->adapter->timeout = msecs_to_jiffies(arg * 10);
+ 		break;
++	case I2C_MUX_DIS_F:
++	{
++		I2cMuxCtrlFlagInfo_T MuxCtrlFlag;
++		if (copy_from_user(&MuxCtrlFlag, (I2cMuxCtrlFlagInfo_T *)arg, sizeof(I2cMuxCtrlFlagInfo_T)))
++         return -EACCES;
++      g_enable_mux_disconnect[MuxCtrlFlag.RootBusNum] = (MuxCtrlFlag.State)?TRUE:FALSE;
++		return 0;
++	}
+ 	default:
+        /* Call the core ioctl (AMI extended)functions */
+         return i2c_ioctl(client->adapter,cmd,arg);
+diff -ruNa linux/drivers/i2c/muxes/i2c-mux-pca954x.c linux_n/drivers/i2c/muxes/i2c-mux-pca954x.c
+--- linux/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-01-27 16:36:24.098473000 +0800
++++ linux_n/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-01-27 17:32:47.490401618 +0800
+@@ -93,6 +93,7 @@
+ 	struct irq_domain *irq;
+ 	unsigned int irq_mask;
+ 	raw_spinlock_t lock;
++	bool ctrl_state;
+ };
+ 
+ /* Provide specs for the PCA954x types we know about */
+@@ -223,7 +224,6 @@
+ 			     struct i2c_client *client, u8 val)
+ {
+ 	union i2c_smbus_data dummy;
+-
+ 	return __i2c_smbus_xfer(adap, client->addr, client->flags,
+ 				I2C_SMBUS_WRITE, val,
+ 				I2C_SMBUS_BYTE, &dummy);
+@@ -262,13 +262,21 @@
+ 	struct pca954x *data = i2c_mux_priv(muxc);
+ 	struct i2c_client *client = data->client;
+ 	s8 idle_state;
++	bool ctrl_state;
++	struct i2c_adapter *root;
+ 
+ 	idle_state = READ_ONCE(data->idle_state);
++	ctrl_state = READ_ONCE(data->ctrl_state);
+ 	if (idle_state >= 0)
+ 		/* Set the mux back to a predetermined channel */
+ 		return pca954x_select_chan(muxc, idle_state);
+-
++#if 0
+ 	if (idle_state == MUX_IDLE_DISCONNECT) {
++#else
++	if (idle_state == MUX_IDLE_DISCONNECT || \
++		(ctrl_state && ((root = i2c_root_adapter(&muxc->parent->dev))?g_enable_mux_disconnect[root->nr]:FALSE))) 
++	{
++#endif
+ 		/* Deselect active channel */
+ 		data->last_chan = 0;
+ 		return pca954x_reg_write(muxc->parent, client,
+@@ -417,6 +425,7 @@
+ 	struct device *dev = &client->dev;
+ 	struct device_node *np = dev->of_node;
+ 	bool idle_disconnect_dt;
++	bool ctrl_disconnect_dt;
+ 	struct gpio_desc *gpio;
+ 	struct i2c_mux_core *muxc;
+ 	struct pca954x *data;
+@@ -483,7 +492,9 @@
+ 		of_property_read_bool(np, "i2c-mux-idle-disconnect");
+ 	if (idle_disconnect_dt)
+ 		data->idle_state = MUX_IDLE_DISCONNECT;
+-
++	ctrl_disconnect_dt = np &&
++        of_property_read_bool(np, "i2c-mux-ctrl-disconnect");
++        data->ctrl_state = (ctrl_disconnect_dt)?TRUE:FALSE;
+ 	ret = pca954x_irq_setup(muxc);
+ 	if (ret)
+ 		goto fail_cleanup;
+diff -ruNa linux/include/linux/i2c.h linux_n/include/linux/i2c.h
+--- linux/include/linux/i2c.h	2022-01-27 16:36:25.466473000 +0800
++++ linux_n/include/linux/i2c.h	2022-01-26 16:56:55.538789000 +0800
+@@ -30,6 +30,8 @@
+ extern struct device_type i2c_adapter_type;
+ extern struct device_type i2c_client_type;
+ 
++extern bool g_enable_mux_disconnect[MAX_I2C_ADAPTERS];
++
+ /* --- General options ------------------------------------------------	*/
+ 
+ struct i2c_msg;
+diff -ruNa linux/include/uapi/linux/i2c-dev.h linux_n/include/uapi/linux/i2c-dev.h
+--- linux/include/uapi/linux/i2c-dev.h	2022-01-27 16:36:24.098473000 +0800
++++ linux_n/include/uapi/linux/i2c-dev.h	2022-01-26 16:57:03.238788000 +0800
+@@ -53,7 +53,7 @@
+ #define I2C_SMBUS	0x0720	/* SMBus transfer */
+ 
+ 
+-
++#define I2C_MUX_DIS_F   0x0730  /* Control I2C mux PCA954x disconnect flag */
+ 
+ 
+ /* Extended IOCTLS - Implemented in i2c-core and hardware */

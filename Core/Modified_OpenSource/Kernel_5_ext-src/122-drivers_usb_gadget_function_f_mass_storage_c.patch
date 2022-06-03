@@ -1,0 +1,35 @@
+--- linux/drivers/usb/gadget/function/f_mass_storage.c	2022-01-21 16:47:50.597404005 +0800
++++ linux.new/drivers/usb/gadget/function/f_mass_storage.c	2022-01-21 16:49:41.000000000 +0800
+@@ -264,7 +264,7 @@
+ 	struct fsg_dev		*fsg;
+ 	wait_queue_head_t	io_wait;
+ 	wait_queue_head_t	fsg_wait;
+-
++	wait_queue_head_t	eject_wait;
+ 	/* filesem protects: backing files in use */
+ 	struct rw_semaphore	filesem;
+ 
+@@ -2805,6 +2805,7 @@
+ 	init_completion(&common->thread_notifier);
+ 	init_waitqueue_head(&common->io_wait);
+ 	init_waitqueue_head(&common->fsg_wait);
++	init_waitqueue_head(&common->eject_wait);
+ 	common->state = FSG_STATE_TERMINATED;
+ 	memset(common->luns, 0, sizeof(common->luns));
+ 
+@@ -3262,6 +3263,7 @@
+ 	pAMI_media_event_status_priv->MediaStatus = 0x00;
+ 	
+ 	pAMI_media_event_status_priv->additional_media_eject = MEDIA_EVENT_ID_EJECT_REQUEST;	// For CD eject event with Windows Host.
++	wait_event(common->eject_wait, pAMI_media_event_status_priv->additional_media_eject == MEDIA_EVENT_ID_NO_EVENT);
+ 
+ 	return 0; // all right.
+ }
+@@ -3495,6 +3497,7 @@
+ 			// up_write(&common->filesem);
+ 			// up_read(&common->filesem);
+ 			pAMI_media_event_status_priv->additional_media_eject = MEDIA_EVENT_ID_NO_EVENT;
++			wake_up(&common->eject_wait);
+ 			// printk("DBG!!! node type %d lun %d mode %d unload\n", node_type_id, Instance, pAMI_gadget_priv->redirect_mode);
+ //			if (GADGET_REDIRECTION_MODE_BYPASS == pAMI_gadget_priv->redirect_mode)
+ //			{	// once stop the media redirection, set mode to origin to avoid the timeout of request.

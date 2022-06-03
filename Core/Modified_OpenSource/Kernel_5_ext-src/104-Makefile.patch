@@ -1,0 +1,11 @@
+--- linux/drivers/i2c/Makefile	2021-10-06 19:20:19.653078185 +0530
++++ linux_new/drivers/i2c/Makefile	2021-10-07 13:28:04.844737065 +0530
+@@ -16,7 +16,7 @@
+ obj-y				+= algos/ busses/ muxes/
+ obj-$(CONFIG_I2C_STUB)		+= i2c-stub.o
+ obj-$(CONFIG_I2C_SLAVE_EEPROM)	+= i2c-slave-eeprom.o
+-obj-$(CONFIG_I2C_SLAVE)     += i2c-slave-read.o
++obj-$(CONFIG_I2C_SLAVE)     += i2c-slave-read.o i2c-slave-ssif.o
+ 
+ ccflags-$(CONFIG_I2C_DEBUG_CORE) := -DDEBUG
+ ccflags-y += -DI2C_BUS_RECOVERY

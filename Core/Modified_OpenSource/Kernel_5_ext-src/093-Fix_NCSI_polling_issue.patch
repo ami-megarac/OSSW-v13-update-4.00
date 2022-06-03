@@ -1,0 +1,217 @@
+diff -Naur linux_org/net/ncsi/internal.h linux/net/ncsi/internal.h
+--- linux_org/net/ncsi/internal.h	2021-09-30 15:14:29.502556506 +0800
++++ linux/net/ncsi/internal.h	2021-09-29 15:28:17.283672000 +0800
+@@ -249,6 +249,7 @@
+ 	bool is_enable;
+ 	u32 status;	
+ 	unsigned char id;
++	struct ncsi_channel *nc;
+ };
+ 
+ struct ncsi_request {
+@@ -338,6 +339,7 @@
+ 	struct work_struct  aen_work;        /* For aen management     */
+ 	struct aen_status	aen_stat;		 /* For aen status     */
+ 	struct ncsi_poll_link_status polling; /* For polling status     */
++	struct work_struct  polling_work;        /* For aen management     */
+ };
+ 
+ struct ncsi_cmd_arg {
+@@ -409,5 +411,6 @@
+ int ncsi_aen_handler(struct ncsi_dev_priv *ndp, struct sk_buff *skb);
+ int ncsi_set_flow_control(struct ncsi_dev_priv *ndp, unsigned char  UserFlowcontrol);
+ int ncsi_set_Vetobit(struct ncsi_dev_priv *ndp, unsigned char  Vetobit);
++void ncsi_channel_update(struct ncsi_dev_priv *ndp, struct ncsi_channel *nc);
+ 
+ #endif /* __NCSI_INTERNAL_H__ */
+diff -Naur linux_org/net/ncsi/ncsi-manage.c linux/net/ncsi/ncsi-manage.c
+--- linux_org/net/ncsi/ncsi-manage.c	2021-09-30 15:14:23.582809972 +0800
++++ linux/net/ncsi/ncsi-manage.c	2021-09-30 15:15:52.551000496 +0800
+@@ -81,9 +81,9 @@
+ 
+ 			spin_unlock_irqrestore(&nc->lock, flags);
+ 		}
+-	}
++	}	
+ 	nd->link_up = 0;
+-
++	
+ report:
+ 	if(rtnl_trylock()){
+ 		call_netdevice_notifiers(NETDEV_CHANGE,nd->dev);
+@@ -94,37 +94,24 @@
+ 	nd->handler(nd);	
+ }
+ 
+-static void ncsi_channel_monitor(struct timer_list *t)
++#ifdef CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS
++void ncsi_polling_work(struct work_struct *work)
+ {
+-	struct ncsi_channel *nc = from_timer(nc, t, monitor.timer);
+-	struct ncsi_channel *nc_monitor;
+-	struct ncsi_package *np = nc->package;
+-	struct ncsi_dev_priv *ndp = np->ndp;	
+-	struct ncsi_cmd_arg nca;
+-	struct ncsi_channel *disable=NULL, *enable=NULL;	
++	struct ncsi_dev_priv *ndp = container_of(work,
++			struct ncsi_dev_priv, polling_work);		
++	struct ncsi_channel *nc=NULL, *disable=NULL, *enable=NULL;	
+ 	int i;
+ 	
+-	//Make sure NCSI command able to send
+-	netif_carrier_on(ndp->ndev.dev);	
+-		
+-	NCSI_FOR_EACH_PACKAGE(ndp, np) {
+-		NCSI_FOR_EACH_CHANNEL(np, nc_monitor) {
+-			nca.ndp = ndp;
+-			nca.package = np->id;
+-			nca.channel = nc_monitor->id;
+-			nca.type = NCSI_PKT_CMD_GLS;
+-			nca.req_flags = 0;
+-			ncsi_xmit_cmd(&nca);		
+-		}
+-	}
+-
+ 	if(verbose){
+ 		printk("ndp->polling.status = %x, ndp->polling.id = %d\n", ndp->polling.status, ndp->polling.id);
+ 	}
+ 	
++	nc = ndp->polling.nc ;	
++	
+ 	if(!((ndp->polling.status >> ndp->polling.id)&0x1)){					
+ 		disable = ncsi_find_channel(nc->package, ndp->polling.id);						
+ 		
++		//Find available channel
+ 		for(i = 0; i < NCSI_MAX_CHANNEL; i++){
+ 			if((ndp->polling.status >> i)&0x1){
+ 				enable = ncsi_find_channel(nc->package, i);				
+@@ -132,16 +119,44 @@
+ 				break;
+ 			}
+ 		}
+-			
++		
+ 		if(!enable)
+-			goto out;				
++			ndp->polling.id = 32;
++				
++		//Force linkdown to trigger bond net event
++		ncsi_report_link(ndp, true);
++		msleep(100);
+ 		
+ 		ncsi_update_tx_channel(ndp, nc->package, disable, enable);
+ 		ncsi_report_link(ndp, false);
+ 	}
++	
++	return;
++}
++#endif
++
++static void ncsi_channel_monitor(struct timer_list *t)
++{
++	struct ncsi_channel *nc = from_timer(nc, t, monitor.timer);
++	struct ncsi_channel *nc_monitor;
++	struct ncsi_package *np = nc->package;
++	struct ncsi_dev_priv *ndp = np->ndp;	
++	struct ncsi_cmd_arg nca;
++		
++	//Make sure NCSI command able to send
++	netif_carrier_on(ndp->ndev.dev);	
++		
++	NCSI_FOR_EACH_PACKAGE(ndp, np) {
++		NCSI_FOR_EACH_CHANNEL(np, nc_monitor) {
++			nca.ndp = ndp;
++			nca.package = np->id;
++			nca.channel = nc_monitor->id;
++			nca.type = NCSI_PKT_CMD_GLS;
++			nca.req_flags = 0;
++			ncsi_xmit_cmd(&nca);		
++		}
++	}
+ 
+-out:	
+-	ndp->polling.status = 0;
+ #ifdef CONFIG_SPX_FEATURE_NCSI_TIMER_DEALAY_FOR_GET_LINK_STATUS
+ 	mod_timer(&nc->monitor.timer, jiffies + (CONFIG_SPX_FEATURE_NCSI_TIMER_DEALAY_FOR_GET_LINK_STATUS*HZ));
+ #else
+@@ -1833,6 +1848,9 @@
+ 	INIT_LIST_HEAD(&ndp->vlan_vids);
+ 	INIT_WORK(&ndp->work, ncsi_dev_work);
+ 	INIT_WORK(&ndp->aen_work, ncsi_aen_work);
++#ifdef CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS	
++	INIT_WORK(&ndp->polling_work, ncsi_polling_work);
++#endif	
+ 	ndp->package_whitelist = UINT_MAX;
+ 
+ 	/* Initialize private NCSI device */
+diff -Naur linux_org/net/ncsi/ncsi-rsp.c linux/net/ncsi/ncsi-rsp.c
+--- linux_org/net/ncsi/ncsi-rsp.c	2021-09-30 15:14:35.518298931 +0800
++++ linux/net/ncsi/ncsi-rsp.c	2021-09-30 18:28:47.514578949 +0800
+@@ -316,13 +316,14 @@
+ {
+ 	struct ncsi_rsp_gls_pkt *rsp;
+ 	struct ncsi_dev_priv *ndp = nr->ndp;
++	struct ncsi_package *np;
+ 	struct ncsi_channel *nc;
+ 	struct ncsi_channel_mode *ncm;
+ 
+ 	/* Find the package and channel */
+ 	rsp = (struct ncsi_rsp_gls_pkt *)skb_network_header(nr->rsp);
+ 	ncsi_find_package_and_channel(ndp, rsp->rsp.common.channel,
+-				      NULL, &nc);
++				      &np, &nc);
+ 	if (!nc)
+ 		return -ENODEV;
+ 
+@@ -332,12 +333,19 @@
+ 	ncm->data[4] = ntohl(rsp->oem_status);		
+ 	
+ #ifdef CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS	   
+-	if(ntohl(rsp->status)&0x1)
+-		ndp->polling.status |= (0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));
+-#endif			
++	if(ntohl(rsp->status)&0x1){
++		ndp->polling.status |= (0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));	
++	}else{
++		ndp->polling.status &= ~(0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));
++	}
+ 	
+-	if (nr->flags & NCSI_REQ_FLAG_EVENT_DRIVEN)
+-		return 0;	
++	//Check link status at received last channel status
++	if((NCSI_CHANNEL_INDEX(rsp->rsp.common.channel) == (np->channel_num-1)) && (InitComplete == 1))	
++	{		
++			ndp->polling.nc = nc;
++			schedule_work(&ndp->polling_work);
++	}
++#endif
+ 	
+ 	return 0;
+ }
+@@ -1118,9 +1126,8 @@
+ 	struct ncsi_dev_priv *ndp;
+ 	struct ncsi_request *nr;
+ 	struct ncsi_pkt_hdr *hdr;
+-#ifdef CONFIG_SPX_FEATURE_POLL_FOR_ASYNC_RESET
+ 	struct ncsi_rsp_pkt_hdr *h;
+-#endif
++
+ 	unsigned long flags;
+ 	int payload, i, ret;
+ 
+@@ -1203,7 +1210,14 @@
+ #endif		
+ 		goto out;
+ 	}
+-
++	
++	if(verbose)
++	{
++		h = (struct ncsi_rsp_pkt_hdr *)skb_network_header(nr->rsp);
++		
++		printk("NCSI(%d,%d): Received packet with type 0x%02x\n", NCSI_PACKAGE_INDEX(h->common.channel),  NCSI_CHANNEL_INDEX(h->common.channel), hdr->type);
++	}
++	
+ 	/* Process the packet */
+ 	ret = nrh->handler(nr);
+ 	if (ret)

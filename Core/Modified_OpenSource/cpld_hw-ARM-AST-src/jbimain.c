@@ -1183,6 +1183,8 @@ JBI_RETURN_TYPE jbi_execute(
 			break;
 
 		case 0x41: /* PSHV */
+            /* Reason for false positive - work as designed */
+            /* coverity[var_deref_op : FALSE] */
 			stack[stack_ptr++] = variables[args[0]];
 			break;
 

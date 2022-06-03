@@ -1,0 +1,36 @@
+###############################################################################
+# INTEL CONFIDENTIAL                                                          #
+#                                                                             #
+# Copyright 2021 Intel Corporation.                                           #
+#                                                                             #
+# This software and the related documents are Intel copyrighted materials,    #
+# and your use of them is governed by the express license under which they    #
+# were provided to you ("License"). Unless the License provides otherwise,    #
+# you may not use, modify, copy, publish, distribute, disclose or transmit    #
+# this software or the related documents without Intel's prior written        #
+# permission.                                                                 #
+#                                                                             #
+# This software and the related documents are provided as is, with no express #
+# or implied warranties, other than those that are expressly stated in the    #
+# License.                                                                    #
+###############################################################################
+
+from lib.Section import Section
+
+import warnings
+
+
+class Big_core(Section):
+    def __init__(self, jOutput):
+        Section.__init__(self, jOutput, "big_core")
+        self.nCores = 0
+        self.verifySection()
+        self.rootNodes = f"cores: {self.nCores}"
+
+    def verifySection(self):
+        for key in self.sectionInfo:
+            if key.startswith("core"):
+                self.nCores += 1
+            elif not key.startswith('_'):
+                warnings.warn(f"Key {key}, not expected in {self.sectionName}")
+            self.search(key, self.sectionInfo[key])

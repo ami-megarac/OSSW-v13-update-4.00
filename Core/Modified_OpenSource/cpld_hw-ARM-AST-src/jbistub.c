@@ -139,9 +139,17 @@ void jbi_message(char *message_text)
         char* pStr = NULL;    
         pStr=strstr (message_text,"CODE");
         if (pStr != NULL){
-            if(sscanf(pStr,"CODE is %X",pReadData)== 1);
-            else if(sscanf(pStr,"CODE code is %X",pReadData)== 1);
-        }
+            if(sscanf(pStr,"CODE is %X",pReadData)== 1)
+			{
+				return;
+			}
+            else if(sscanf(pStr,"CODE code is %X",pReadData)== 1)
+			{
+				return;
+			}
+			else
+				return;
+		}
     }
     else {
         dbgprintf("%s.\n",message_text);
@@ -396,7 +404,6 @@ int jbcmain(char* jbc_action,unsigned long *buf, unsigned long data_size,unsigne
 					//exit(1);
  					exec_result = JBIC_IO_ERROR;
 					exit_status = 1;
- 					continue;
 					break;
 
 				default:
@@ -523,6 +530,8 @@ void delay_loop(long count)
 				idle_count = 0;
 			}
 			udelay( count);
+            /* Reason for false positive - work as designed */
+            /* coverity[result_independent_of_operands : FALSE] */
 			count-= count;
 		}
 	}

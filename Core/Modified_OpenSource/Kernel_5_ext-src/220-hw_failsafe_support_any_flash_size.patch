@@ -1,0 +1,60 @@
+--- linux_orig/drivers/mtd/parsers/spx-fmh.c	2022-04-08 11:47:28.543020870 +0530
++++ linux/drivers/mtd/parsers/spx-fmh.c	2022-04-08 11:56:46.351081172 +0530
+@@ -21,8 +21,9 @@
+ #include "fmh.h"
+ #include "../mtdcore.h"
+ 
+-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+ unsigned char broken_spi_banks = 0;// specify the number of broken SPI flash bank
++unsigned long spi_bank_size = 0;// specify the SPI flash bank size
+ #endif
+ 
+ 
+@@ -85,7 +86,7 @@
+         else
+ #endif
+         {
+-            img2_offset+=CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE;
++            img2_offset+=FlashSize/2;
+         }
+     }
+ 
+@@ -126,6 +127,17 @@
+ 	endingsector=(unsigned long)div_u64(FlashSize,SectorSize);
+ #endif	
+ 
++#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
++        if(broken_spi_banks == 1 || broken_spi_banks == 2)
++        {
++                spi_bank_size=FlashSize;
++        }
++        else
++        {
++                spi_bank_size=FlashSize/2;
++        }
++#endif
++
+ #if defined (CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT)
+ START_SCAN:
+ #endif
+@@ -240,7 +252,7 @@
+ 			startingsector=startingsector_p;
+ 			endingsector=endingsector_p;
+ 			startaddress=startaddress_p;
+-#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) || defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
++#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+ 			if (broken_spi_banks == 0)
+ #endif
+ 			{
+@@ -299,8 +311,9 @@
+ };
+ module_mtd_part_parser(fmh_parser);
+ 
+-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+ EXPORT_SYMBOL(broken_spi_banks) ;
++EXPORT_SYMBOL(spi_bank_size);
+ #endif
+ #define DRV_MODULE_VERSION      "1.0.0"
+ 

@@ -1,0 +1,597 @@
+--- linux/drivers/net/ethernet/faraday/ftgmac100.c	2022-03-28 14:50:51.408013200 +0800
++++ linux-5.4.184/drivers/net/ethernet/faraday/ftgmac100.c	2022-03-28 15:03:18.729315667 +0800
+@@ -47,6 +47,9 @@
+ 
+ /* Min number of tx ring entries before stopping queue */
+ #define TX_THRESHOLD		(MAX_SKB_FRAGS + 1)
++#if (DEF_TX_QUEUE_ENTRIES < 2 * TX_THRESHOLD)
++#error "TX queue entries not enough"
++#endif
+ 
+ #define FTGMAC_100MHZ		100000000
+ #define FTGMAC_25MHZ		25000000
+@@ -90,10 +93,14 @@
+ 	struct mii_bus *mii_bus;
+ 	struct clk *clk;
+ 
++	/* 2600 RMII clock gate */
++	struct clk *rclk;
++
+ 	/* Link management */
+ 	int cur_speed;
+ 	int cur_duplex;
+ 	bool use_ncsi;
++	bool use_fixed_phy;
+ 
+ 	/* Multicast filter settings */
+ 	u32 maht0;
+@@ -105,7 +112,7 @@
+ 	bool aneg_pause;
+ 
+ 	/* Misc */
+-	bool need_mac_restart;
++	volatile bool need_mac_restart;
+ 	bool is_aspeed;
+ };
+ 
+@@ -558,11 +565,7 @@
+ 	netdev->stats.rx_packets++;
+ 	netdev->stats.rx_bytes += size;
+ 
+-	/* push packet to protocol stack */
+-	if (skb->ip_summed == CHECKSUM_NONE)
+-		netif_receive_skb(skb);
+-	else
+-		napi_gro_receive(&priv->napi, skb);
++	napi_gro_receive(&priv->napi, skb);
+ 
+ 	(*processed)++;
+ 	return true;
+@@ -645,6 +648,9 @@
+ 	if (ctl_stat & FTGMAC100_TXDES0_TXDMA_OWN)
+ 		return false;
+ 
++	if ((ctl_stat & ~(priv->txdes0_edotr_mask)) == 0)
++		return false;
++
+ 	skb = priv->tx_skbs[pointer];
+ 	netdev->stats.tx_packets++;
+ 	netdev->stats.tx_bytes += skb->len;
+@@ -707,6 +713,7 @@
+ 	struct ftgmac100_txdes *txdes, *first;
+ 	unsigned int pointer, nfrags, len, i, j;
+ 	u32 f_ctl_stat, ctl_stat, csum_vlan;
++	u32 wake_napi_bh = 0;
+ 	dma_addr_t map;
+ 
+ 	/* The HW doesn't pad small frames */
+@@ -753,6 +760,9 @@
+ 	/* Grab the next free tx descriptor */
+ 	pointer = priv->tx_pointer;
+ 	txdes = first = &priv->txdes[pointer];
++	if ((le32_to_cpu(txdes->txdes0) & ~priv->txdes0_edotr_mask) != 0) {
++		goto drop;
++	}
+ 
+ 	/* Setup it up with the packet head. Don't write the head to the
+ 	 * ring just yet
+@@ -785,6 +795,11 @@
+ 		/* Setup descriptor */
+ 		priv->tx_skbs[pointer] = skb;
+ 		txdes = &priv->txdes[pointer];
++
++		if ((le32_to_cpu(txdes->txdes0) & ~priv->txdes0_edotr_mask) != 0) {
++			goto dma_err;
++		}
++
+ 		ctl_stat = ftgmac100_base_tx_ctlstat(priv, pointer);
+ 		ctl_stat |= FTGMAC100_TXDES0_TXDMA_OWN;
+ 		ctl_stat |= FTGMAC100_TXDES0_TXBUF_SIZE(len);
+@@ -819,6 +834,24 @@
+ 			netif_wake_queue(netdev);
+ 	}
+ 
++	/* When sending UDP packets, we may never receive a packet to activate 
++	 * the NAPI BH. And hence we don't have chance to free the TX data.
++	 * The workaround is to enable FTGMAC100_INT_XPKT_ETH, then the NAPI BH 
++	 * can be woke up in the ISR.
++	*/
++	if ((cpu_to_be16(ETH_P_IP) == skb->protocol) &&
++	    (IPPROTO_UDP == ip_hdr(skb)->protocol)) {
++		wake_napi_bh = 1;
++	}
++
++	if (wake_napi_bh) {
++		u32 ier = ioread32(priv->base + FTGMAC100_OFFSET_IER);
++		/* IER == FTGMAC100_INT_ALL implies NAPI is not running */
++		if (FTGMAC100_INT_ALL == ier)
++			iowrite32(ier | FTGMAC100_INT_XPKT_ETH,
++				  priv->base + FTGMAC100_OFFSET_IER);
++	}
++
+ 	/* Poke transmitter to read the updated TX descriptors */
+ 	iowrite32(1, priv->base + FTGMAC100_OFFSET_NPTXPD);
+ 
+@@ -1037,6 +1070,7 @@
+ 
+ 	/* Disable all interrupts */
+ 	iowrite32(0, priv->base + FTGMAC100_OFFSET_IER);
++	ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 
+ 	/* Reset the adapter asynchronously */
+ 	schedule_work(&priv->reset_task);
+@@ -1215,6 +1249,219 @@
+ 	return 0;
+ }
+ 
++static int ftgmac100_run_loopback(struct net_device *netdev, uint32_t loopback_mode)
++{
++	struct ftgmac100 *priv = netdev_priv(netdev);
++	struct ftgmac100_rxdes *rxdes;	
++	struct sk_buff *txskb, *rxskb;
++	dma_addr_t map;
++	unsigned int pkt_size = 60, pointer, rx_size;
++	uint32_t reg, status;
++	int i, err;
++	unsigned char *txpkt, *rxpkt;
++	bool rx_pkt_found = false;
++
++	if (netif_running(netdev)) {
++		netif_trans_update(netdev);
++		napi_disable(&priv->napi);
++		netif_stop_queue(netdev);
++	}
++
++	/* Stop and reset the MAC */
++	ftgmac100_stop_hw(priv);
++	err = ftgmac100_reset_and_config_mac(priv);
++	if (err) {
++		/* Not much we can do ... it might come back... */
++		netdev_err(netdev, "attempting to continue...\n");
++	}
++
++	/* Free all rx and tx buffers */
++	ftgmac100_free_buffers(priv);
++
++	/* Re-init descriptors (adjust queue sizes) */
++	ftgmac100_init_rings(priv);
++
++	/* Realloc rx descriptors */
++	err = ftgmac100_alloc_rx_buffers(priv);
++
++	/* Reinit and restart HW */
++	ftgmac100_init_hw(priv);
++	ftgmac100_config_pause(priv);
++	ftgmac100_start_hw(priv);
++
++	/* Disable all interrupts */
++	iowrite32(0, priv->base + FTGMAC100_OFFSET_IER);
++
++	if (FTGMAC100_MAC_LOOPBACK == loopback_mode) {
++		reg = ioread32(priv->base + FTGMAC100_OFFSET_REVR) |
++		      FTGMAC100_INTERNAL_LOOPBACK_EN;
++		iowrite32(reg, priv->base + FTGMAC100_OFFSET_REVR);
++	}
++
++	/**
++	 * prepare TX packet
++	 *   MAC DA: priv->netdev->dev_addr
++	 *   MAC SA: priv->netdev->dev_addr
++	 *   ETH type: ETH_P_LOOP (0060)
++	 *   payload: 0x00, 0x01, 0x02, ... , 0x2b, 0x2c, 0x2d
++	 *   FSC: generated by HW (MAC engine)
++	*/
++	txskb = netdev_alloc_skb_ip_align(netdev, MAX_PKT_SIZE);
++	if (unlikely(!txskb)) {
++		netdev_warn(netdev, "failed to allocate tx skb\n");
++		err = -ENOMEM;
++		goto fail;
++	} 		
++
++	txpkt = skb_put(txskb, pkt_size);
++	memcpy(txpkt, priv->netdev->dev_addr, ETH_ALEN);
++	txpkt += ETH_ALEN;
++	memcpy(txpkt, priv->netdev->dev_addr, ETH_ALEN);
++	txpkt += ETH_ALEN;
++
++	*txpkt++ = ETH_P_LOOP >> 8;
++	*txpkt++ = ETH_P_LOOP & 0xff;
++	
++	for (i = 0; i < pkt_size - ETH_HLEN; i++)
++		*txpkt++ = (unsigned char) (i & 0xff);	
++
++	ftgmac100_hard_start_xmit(txskb, netdev);
++	udelay(10);
++
++	/**
++	 * receive ingress packet
++	*/
++	pointer = priv->rx_pointer;
++	rxdes = &priv->rxdes[pointer];
++
++	for (i = 0; i < 10; i++) {
++		status = le32_to_cpu(rxdes->rxdes0);
++		if (status & FTGMAC100_RXDES0_RXPKT_RDY) {
++			rx_pkt_found = true;
++			break;	
++		} 
++		udelay(1);
++	}
++
++	dma_rmb();
++
++	if (!rx_pkt_found) {
++		err = -EPERM;
++		goto fail;
++	}
++
++	if (unlikely(status & RXDES0_ANY_ERROR)) {
++		err = -EIO;
++		goto fail;
++	}
++
++	rx_size = status & FTGMAC100_RXDES0_VDBC;
++	rxskb = priv->rx_skbs[pointer];
++	skb_put(rxskb, rx_size);
++	map = le32_to_cpu(rxdes->rxdes3);
++	dma_unmap_single(priv->dev, map, rx_size, DMA_FROM_DEVICE);
++	ftgmac100_alloc_rx_buf(priv, pointer, rxdes, GFP_ATOMIC);
++	priv->rx_pointer = ftgmac100_next_rx_pointer(priv, pointer);
++
++	/**
++	 * compare the ingress packet with the egress packet.  FCS shall be 
++	 * excluded since the FCS of the egress packet is provided by HW.
++	*/
++	if ((rx_size - ETH_FCS_LEN) != pkt_size) {
++		err = -EIO;
++		goto fail;
++	}
++
++	if (0) {
++		txpkt = txskb->data;
++		rxpkt = rxskb->data;
++		for (i = 0; i < rx_size; i++)
++			printk("%02x %02x\n", *txpkt++, *rxpkt++);
++	}
++
++	if (0 != memcmp(txskb->data, rxskb->data, pkt_size)) {
++		err = -EIO;
++		goto fail;
++	}
++
++	err = 0;
++
++fail:
++	if (netif_running(netdev)) {
++		netif_trans_update(netdev);
++		napi_enable(&priv->napi);
++		netif_start_queue(netdev);
++	}
++
++	iowrite32(FTGMAC100_INT_ALL, priv->base + FTGMAC100_OFFSET_IER);
++
++	reg = ioread32(priv->base + FTGMAC100_OFFSET_REVR) &
++	      (~FTGMAC100_INTERNAL_LOOPBACK_EN);
++	iowrite32(reg, priv->base + FTGMAC100_OFFSET_REVR);
++
++	return err;
++}
++/* return strings of the test items */
++static const
++char ftgmac100_tests_str_tbl[FTGMAC100_NUM_TESTS][ETH_GSTRING_LEN] = {
++	"internal loopback (offline)     ",
++	"external loopback (offline)     ",
++};
++
++static void ftgmac100_get_strings(struct net_device *dev, u32 stringset, u8 *buf)
++{
++	if (ETH_SS_TEST == stringset) {
++		memcpy(buf, ftgmac100_tests_str_tbl,
++		       FTGMAC100_NUM_TESTS * ETH_GSTRING_LEN);
++	}
++}
++
++/* return number of test items */
++static int ftgmac100_get_sset_count(struct net_device *netdev, int stringset)
++{
++	if (ETH_SS_TEST == stringset)
++		return FTGMAC100_NUM_TESTS;
++	else
++		return -EINVAL;
++}
++
++void ftgmac100_self_test(struct net_device *netdev,
++			 struct ethtool_test *etest, u64 *result) 
++{
++	struct ftgmac100 *priv = netdev_priv(netdev);
++	struct platform_device *pdev = to_platform_device(priv->dev);
++	struct device_node *np = pdev->dev.of_node;
++
++	if (!(np && of_device_is_compatible(np, "aspeed,ast2600-mac"))) {
++		netdev_warn(netdev, "self-test not support\n");
++		etest->flags |= ETH_TEST_FL_FAILED;
++		return;
++	}
++
++	if (0 == (etest->flags & ETH_TEST_FL_OFFLINE)) {
++		netdev_warn(netdev, "no online test items\n");
++		etest->flags |= ETH_TEST_FL_FAILED;
++		return;
++	}
++
++	/* internal loopback */
++	result[0] = ftgmac100_run_loopback(netdev, FTGMAC100_MAC_LOOPBACK);
++	if (result[0])
++		etest->flags |= ETH_TEST_FL_FAILED;
++
++	/* external loopback */
++	if (etest->flags & ETH_TEST_FL_EXTERNAL_LB) {
++		result[1] = ftgmac100_run_loopback(netdev, FTGMAC100_EXT_LOOPBACK);
++		etest->flags |= ETH_TEST_FL_EXTERNAL_LB_DONE;
++		if (result[1])
++			etest->flags |= ETH_TEST_FL_FAILED;
++	}	
++
++	if (netif_running(netdev))
++		schedule_work(&priv->reset_task);
++}
++
++
+ static const struct ethtool_ops ftgmac100_ethtool_ops = {
+ 	.get_drvinfo		= ftgmac100_get_drvinfo,
+ 	.get_link		= ethtool_op_get_link,
+@@ -1225,6 +1472,9 @@
+ 	.set_ringparam		= ftgmac100_set_ringparam,
+ 	.get_pauseparam		= ftgmac100_get_pauseparam,
+ 	.set_pauseparam		= ftgmac100_set_pauseparam,
++	.self_test 		= ftgmac100_self_test,
++	.get_strings		= ftgmac100_get_strings,
++	.get_sset_count		= ftgmac100_get_sset_count,
+ };
+ 
+ static irqreturn_t ftgmac100_interrupt(int irq, void *dev_id)
+@@ -1236,6 +1486,7 @@
+ 	/* Fetch and clear interrupt bits, process abnormal ones */
+ 	status = ioread32(priv->base + FTGMAC100_OFFSET_ISR);
+ 	iowrite32(status, priv->base + FTGMAC100_OFFSET_ISR);
++	ioread32(priv->base + FTGMAC100_OFFSET_ISR);
+ 	if (unlikely(status & FTGMAC100_INT_BAD)) {
+ 
+ 		/* RX buffer unavailable */
+@@ -1256,6 +1507,7 @@
+ 				netdev_warn(netdev,
+ 					   "AHB bus error ! Resetting chip.\n");
+ 			iowrite32(0, priv->base + FTGMAC100_OFFSET_IER);
++			ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 			schedule_work(&priv->reset_task);
+ 			return IRQ_HANDLED;
+ 		}
+@@ -1271,7 +1523,7 @@
+ 
+ 	/* Only enable "bad" interrupts while NAPI is on */
+ 	iowrite32(new_mask, priv->base + FTGMAC100_OFFSET_IER);
+-
++	ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 	/* Schedule NAPI bh */
+ 	napi_schedule_irqoff(&priv->napi);
+ 
+@@ -1306,12 +1558,18 @@
+ 	 * after an RX overflow
+ 	 */
+ 	if (unlikely(priv->need_mac_restart)) {
++		/* clear status again */
++		iowrite32(ioread32(priv->base + FTGMAC100_OFFSET_ISR) &
++			      FTGMAC100_INT_BAD,
++			  priv->base + FTGMAC100_OFFSET_ISR);
++		ioread32(priv->base + FTGMAC100_OFFSET_ISR);
+ 		ftgmac100_start_hw(priv);
+ 		priv->need_mac_restart = false;
+ 
+ 		/* Re-enable "bad" interrupts */
+ 		iowrite32(FTGMAC100_INT_BAD,
+ 			  priv->base + FTGMAC100_OFFSET_IER);
++		ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 	}
+ 
+ 	/* As long as we are waiting for transmit packets to be
+@@ -1345,6 +1603,7 @@
+ 		/* enable all interrupts */
+ 		iowrite32(FTGMAC100_INT_ALL,
+ 			  priv->base + FTGMAC100_OFFSET_IER);
++		ioread32(priv->base + FTGMAC100_OFFSET_IER);			  
+ 	}
+ 
+ 	return work_done;
+@@ -1373,7 +1632,7 @@
+ 
+ 	/* Enable all interrupts */
+ 	iowrite32(FTGMAC100_INT_ALL, priv->base + FTGMAC100_OFFSET_IER);
+-
++	ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 	return err;
+ }
+ 
+@@ -1447,6 +1706,9 @@
+ 	if (priv->use_ncsi) {
+ 		priv->cur_duplex = DUPLEX_FULL;
+ 		priv->cur_speed = SPEED_100;
++	} else if (priv->use_fixed_phy) {
++	    	priv->cur_duplex = netdev->phydev->duplex;
++		priv->cur_speed = netdev->phydev->speed;
+ 	} else {
+ 		priv->cur_duplex = 0;
+ 		priv->cur_speed = 0;
+@@ -1499,6 +1761,7 @@
+ 	netif_napi_del(&priv->napi);
+  err_hw:
+ 	iowrite32(0, priv->base + FTGMAC100_OFFSET_IER);
++	ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 	ftgmac100_free_rings(priv);
+ 	return err;
+ }
+@@ -1517,6 +1780,7 @@
+ 
+ 	/* disable all interrupts */
+ 	iowrite32(0, priv->base + FTGMAC100_OFFSET_IER);
++	ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 
+ 	netif_stop_queue(netdev);
+ 	napi_disable(&priv->napi);
+@@ -1549,6 +1813,7 @@
+ 
+ 	/* Disable all interrupts */
+ 	iowrite32(0, priv->base + FTGMAC100_OFFSET_IER);
++	ioread32(priv->base + FTGMAC100_OFFSET_IER);
+ 
+ 	/* Do the reset outside of interrupt context */
+ 	schedule_work(&priv->reset_task);
+@@ -1705,8 +1970,10 @@
+ 		return;
+ 
+ 	phy_disconnect(netdev->phydev);
+-	mdiobus_unregister(priv->mii_bus);
+-	mdiobus_free(priv->mii_bus);
++	if (priv->mii_bus) {
++		mdiobus_unregister(priv->mii_bus);
++		mdiobus_free(priv->mii_bus);
++	}
+ }
+ 
+ static void ftgmac100_ncsi_handler(struct ncsi_dev *nd)
+@@ -1718,12 +1985,14 @@
+ 		   nd->link_up ? "up" : "down");
+ }
+ 
+-static void ftgmac100_setup_clk(struct ftgmac100 *priv)
++static int ftgmac100_setup_clk(struct ftgmac100 *priv)
+ {
+-	priv->clk = devm_clk_get(priv->dev, NULL);
+-	if (IS_ERR(priv->clk))
+-		return;
++	struct clk *clk;
+ 
++	clk = devm_clk_get(priv->dev, NULL /* MACCLK */);
++	if (IS_ERR(clk))
++		return PTR_ERR(clk);
++	priv->clk = clk;
+ 	clk_prepare_enable(priv->clk);
+ 
+ 	/* Aspeed specifies a 100MHz clock is required for up to
+@@ -1732,6 +2001,14 @@
+ 	 */
+ 	clk_set_rate(priv->clk, priv->use_ncsi ? FTGMAC_25MHZ :
+ 			FTGMAC_100MHZ);
++
++	/* RCLK is for RMII, typically used for NCSI. Optional because its not
++	 * necessary if it's the 2400 MAC or the MAC is configured for RGMII
++	 */
++	priv->rclk = devm_clk_get_optional(priv->dev, "RCLK");
++	clk_prepare_enable(priv->rclk);
++
++	return 0;
+ }
+ 
+ static int ftgmac100_probe(struct platform_device *pdev)
+@@ -1834,19 +2111,22 @@
+ 		}
+ 	} else if (np && of_get_property(np, "phy-handle", NULL)) {
+ 		struct phy_device *phy;
++		priv->use_fixed_phy = of_phy_is_fixed_link(pdev->dev.of_node);
+ 
+ 		phy = of_phy_get_and_connect(priv->netdev, np,
+ 					     &ftgmac100_adjust_link);
+ 		if (!phy) {
+ 			dev_err(&pdev->dev, "Failed to connect to phy\n");
+-			err = -EINVAL;
++			if (priv->use_fixed_phy)
++				of_phy_deregister_fixed_link(pdev->dev.of_node);
+ 			goto err_setup_mdio;
+ 		}
+ 
+ 		/* Indicate that we support PAUSE frames (see comment in
+ 		 * Documentation/networking/phy.txt)
+ 		 */
+-		phy_support_asym_pause(phy);
++		if (!priv->use_fixed_phy)
++			phy_support_asym_pause(phy);
+ 
+ 		/* Display what we found */
+ 		phy_attached_info(phy);
+@@ -1862,8 +2142,11 @@
+ 			goto err_setup_mdio;
+ 	}
+ 
+-	if (priv->is_aspeed)
+-		ftgmac100_setup_clk(priv);
++	if (priv->is_aspeed) {
++		err = ftgmac100_setup_clk(priv);
++		if (err)
++			goto err_ncsi_dev;
++	}
+ 
+ 	/* Default ring sizes */
+ 	priv->rx_q_entries = priv->new_rx_q_entries = DEF_RX_QUEUE_ENTRIES;
+@@ -1891,14 +2174,19 @@
+ 		goto err_register_netdev;
+ 	}
+ 
++	if (np && of_get_property(np, "use-ncsi", NULL)) {
++		NCSI_Net_Driver_Register(netdev);
++	}
++	
+ 	netdev_info(netdev, "irq %d, mapped at %p\n", netdev->irq, priv->base);
+ 
+ 	return 0;
+ 
+-err_ncsi_dev:
+-	if (priv->ndev)
+-		ncsi_unregister_dev(priv->ndev);
+ err_register_netdev:
++	if (priv->rclk)
++		clk_disable_unprepare(priv->rclk);
++	clk_disable_unprepare(priv->clk);
++err_ncsi_dev:
+ 	ftgmac100_destroy_mdio(netdev);
+ err_setup_mdio:
+ 	iounmap(priv->base);
+@@ -1922,6 +2210,8 @@
+ 		ncsi_unregister_dev(priv->ndev);
+ 	unregister_netdev(netdev);
+ 
++	if (priv->rclk)
++		clk_disable_unprepare(priv->rclk);
+ 	clk_disable_unprepare(priv->clk);
+ 
+ 	/* There's a small chance the reset task will have been re-queued,
+@@ -1934,7 +2224,9 @@
+ 	iounmap(priv->base);
+ 	release_resource(priv->res);
+ 
+-	netif_napi_del(&priv->napi);
++	if (priv->use_fixed_phy)
++		of_phy_deregister_fixed_link(pdev->dev.of_node);
++
+ 	free_netdev(netdev);
+ 	return 0;
+ }
+--- linux-5.4.124/drivers/net/ethernet/faraday/ftgmac100.h	2021-09-30 10:10:32.178371050 +0800
++++ linux-5.4.124-new/drivers/net/ethernet/faraday/ftgmac100.h	2021-10-01 14:32:39.670503385 +0800
+@@ -138,6 +138,7 @@
+  * Feature Register
+  */
+ #define FTGMAC100_REVR_NEW_MDIO_INTERFACE	BIT(31)
++#define FTGMAC100_INTERNAL_LOOPBACK_EN		BIT(30)
+ 
+ /*
+  * Receive buffer size register
+@@ -271,4 +272,10 @@
+ #define FTGMAC100_RXDES1_UDP_CHKSUM_ERR	(1 << 26)
+ #define FTGMAC100_RXDES1_IP_CHKSUM_ERR	(1 << 27)
+ 
++
++/* self test */
++#define FTGMAC100_NUM_TESTS		2
++
++#define FTGMAC100_MAC_LOOPBACK		0
++#define FTGMAC100_EXT_LOOPBACK		1
+ #endif /* __FTGMAC100_H */

@@ -1,0 +1,550 @@
+--- linux-5.4.85/drivers/i2c/i2c-core-base.c	2021-04-15 16:08:15.938301401 +0800
++++ linux-5.4.85-new/drivers/i2c/i2c-core-base.c	2021-04-22 13:42:42.797083592 +0800
+@@ -40,6 +40,7 @@
+ #include <linux/slab.h>
+ 
+ #include "i2c-core.h"
++#include <linux/i2c-dev.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/i2c.h>
+@@ -2411,6 +2412,137 @@
+ }
+ EXPORT_SYMBOL_GPL(i2c_put_dma_safe_msg_buf);
+ 
++
++
++
++
++#ifdef I2C_BUS_RECOVERY
++int i2c_recovery_event(void)
++{
++   int id, ret;
++   struct i2c_adapter  *adap;
++
++   for (id = 0; id < MAX_I2C_ADAPTERS; id++)
++   {
++       adap = i2c_get_adapter(id);
++       if (adap != NULL)
++       {
++           if (adap->algo->i2c_recovery)
++           {
++               if (in_atomic() || irqs_disabled())
++               {
++                   ret = rt_mutex_trylock(&adap->bus_lock);
++                   if (!ret)
++                   {
++                       i2c_put_adapter(adap);
++                       continue;
++                   }
++               }
++               else
++               {
++                   rt_mutex_lock(&adap->bus_lock);
++               }
++               ret = adap->algo->i2c_recovery(adap);
++               rt_mutex_unlock(&adap->bus_lock);
++           }
++           i2c_put_adapter(adap);
++       }
++   }
++
++   return 0;
++}
++#endif
++
++/* AMI Extended IOCTLS */
++int i2c_ioctl(struct i2c_adapter * adap,unsigned long cmd, unsigned long arg)
++{
++	switch (cmd)
++	{
++		case I2C_SLAVEREAD:
++			/* IMPORTANT NOTE:
++			   Why we don't lock slave xfer functions?
++
++			   All SPX compliant i2c hardware should never access hardware.
++			   Instead they sleep for slave buffers gets filled up.
++
++			   Since they does access hardware, locking is not needed to
++			   prevent master and slave access to hardware. Also if we lock
++			   the master xfers cannot be done as the slave routines does not
++			   return if if does not have slave data.
++			*/
++			if (adap->algo->slave_recv)
++			{
++				char *tmp;
++				int ret;
++				tmp = kmalloc(MAX_IPMB_MSG_SIZE,GFP_KERNEL);
++				if (!tmp)
++					return -ENOMEM;
++				ret = adap->algo->slave_recv(adap,tmp,MAX_IPMB_MSG_SIZE);
++				if (ret > 0)
++					ret = copy_to_user((char *)arg,tmp,ret)?-EFAULT:ret;
++				kfree(tmp);
++				return ret;
++			}
++			break;
++
++		case SMBUS_HOST_NOTIFY:
++			if (adap->algo->smb_slave_recv)
++			{
++				char 	*tmp;
++				int 	ret = 0;
++				int     count = 0;
++				tmp = kmalloc(MAX_IPMB_MSG_SIZE, GFP_KERNEL);
++				if (tmp==NULL)
++					return -ENOMEM;
++
++				ret = adap->algo->smb_slave_recv(adap,tmp,count);
++				if (ret > 0)
++					ret = copy_to_user((unsigned char __user *)arg,tmp,ret)?-EFAULT:ret;
++#ifdef DEBUG
++				printk (KERN_DEBUG "ret value returned in slave receive call = 0x%x\n", ret);
++#endif
++				kfree(tmp);
++				return ret;
++			}
++			break;
++
++		/* UNTESTED CODE :We don't have any scenario to test slave writes */
++#if 1
++		case I2C_SLAVEWRITE:
++			if (adap->algo->slave_send)
++			{
++				char *tmp;
++				int ret;
++				tmp = kmalloc(MAX_IPMB_MSG_SIZE,GFP_KERNEL);
++				if (!tmp)
++					return -ENOMEM;
++				ret = copy_from_user(tmp,(char *)arg,MAX_IPMB_MSG_SIZE)?-EFAULT:0;
++				if (ret == -EFAULT)
++				{
++					kfree(tmp);
++					return -EFAULT;
++				}
++				return adap->algo->slave_send(adap,tmp,MAX_IPMB_MSG_SIZE);
++			}
++			break;
++#endif
++		default:
++			if (adap->algo->i2c_hw_ioctl)
++				return adap->algo->i2c_hw_ioctl(adap,cmd,arg);
++			break;
++	}
++
++	/* NOTE:  returning a fault code here could cause trouble
++	 * in buggy userspace code.  Some old kernel bugs returned
++	 * zero in this case, and userspace code might accidentally
++	 * have depended on that bug.
++	 */
++	return -ENOTTY;
++}
++
++EXPORT_SYMBOL(i2c_ioctl);
++
++
+ MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
+ MODULE_DESCRIPTION("I2C-Bus main module");
+ MODULE_LICENSE("GPL");
+--- linux-5.4.85/drivers/i2c/i2c-dev.c	2021-04-15 16:08:15.942301319 +0800
++++ linux-5.4.85-new/drivers/i2c/i2c-dev.c	2021-04-22 13:43:08.396515940 +0800
+@@ -480,12 +480,8 @@
+ 		client->adapter->timeout = msecs_to_jiffies(arg * 10);
+ 		break;
+ 	default:
+-		/* NOTE:  returning a fault code here could cause trouble
+-		 * in buggy userspace code.  Some old kernel bugs returned
+-		 * zero in this case, and userspace code might accidentally
+-		 * have depended on that bug.
+-		 */
+-		return -ENOTTY;
++       /* Call the core ioctl (AMI extended)functions */
++        return i2c_ioctl(client->adapter,cmd,arg);
+ 	}
+ 	return 0;
+ }
+--- linux-5.4.85/drivers/i2c/Makefile	2021-04-15 16:08:15.930301560 +0800
++++ linux-5.4.85-new/drivers/i2c/Makefile	2021-04-22 13:46:31.404010417 +0800
+@@ -16,5 +16,9 @@
+ obj-y				+= algos/ busses/ muxes/
+ obj-$(CONFIG_I2C_STUB)		+= i2c-stub.o
+ obj-$(CONFIG_I2C_SLAVE_EEPROM)	+= i2c-slave-eeprom.o
++obj-$(CONFIG_I2C_SLAVE)     += i2c-slave-read.o
+ 
+ ccflags-$(CONFIG_I2C_DEBUG_CORE) := -DDEBUG
++ccflags-y += -DI2C_BUS_RECOVERY
++
++
+--- linux-5.4.85/include/linux/i2c.h	2021-04-15 16:08:56.853479321 +0800
++++ linux-5.4.85-new/include/linux/i2c.h	2021-04-22 13:47:22.786869099 +0800
+@@ -21,6 +21,11 @@
+ #include <linux/swab.h>		/* for swab16 */
+ #include <uapi/linux/i2c.h>
+ 
++
++#define MAX_IPMB_MSG_SIZE  128
++#define MAX_I2C_ADAPTERS   16
++
++
+ extern struct bus_type i2c_bus_type;
+ extern struct device_type i2c_adapter_type;
+ extern struct device_type i2c_client_type;
+@@ -121,6 +126,9 @@
+ extern int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
+ 			  int num);
+ 
++/* Extended IOCTLs -implemented in i2c-core */
++extern int i2c_ioctl(struct i2c_adapter *adap, unsigned long cmd, unsigned long arg);
++
+ /* This is the very generalized SMBus access routine. You probably do not
+    want to use this, though; one of the functions below may be much easier,
+    and probably just as fast.
+@@ -547,6 +555,20 @@
+ 	/* To determine what the adapter supports */
+ 	u32 (*functionality)(struct i2c_adapter *adap);
+ 
++
++   /* AMI Extended Functions */
++   /* i2c recovery */
++   int (*i2c_recovery) (struct i2c_adapter *adap);
++
++   /* Slave Receive and Slave Send Functions */
++   int (*slave_send)(struct i2c_adapter *adap , char *data ,int size);
++   int (*slave_recv)(struct i2c_adapter *adap , char *data ,int size);
++   int (*smb_slave_recv)(struct i2c_adapter *adap , char *data , int size);
++
++   /* Extended IOCTL Calls */
++   int (*i2c_hw_ioctl)(struct i2c_adapter *adap, unsigned long cmd , unsigned long arg);
++
++
+ #if IS_ENABLED(CONFIG_I2C_SLAVE)
+ 	int (*reg_slave)(struct i2c_client *client);
+ 	int (*unreg_slave)(struct i2c_client *client);
+@@ -1005,4 +1027,44 @@
+ }
+ #endif /* CONFIG_ACPI */
+ 
++
++/****************************************************/
++/*             AMI Recovery Begin                      */
++/* Keeping this for backward compatability. May be  */
++/* from 3.14.x onwards we can use generic recovery? */
++/****************************************************/
++extern int i2c_recovery_event(void);
++
++/*
++ * i2c_recovery is the structure used to specify the recovery parameters for the bus
++ */
++#define DEFAULT_NUM_PULSES     16
++#define DEFAULT_PULSE_PERIOD       5
++#define DEFAULT_FREQ           100000
++#define ENABLE_SMBUS_RESET     1
++#define DISABLE_SMBUS_RESET        0
++#define ENABLE_CLOCK_PULSE     1
++#define DISABLE_CLOCK_PULSE        0
++#define ENABLE_FORCE_STOP      1
++#define DISABLE_FORCE_STOP     0
++#define ENABLE_RECOVERY            1
++#define DISABLE_RECOVERY       0   /* Recovery should not be done on multi-master bus - Disable Recovery */
++typedef struct
++{
++   int enable_recovery;
++   int is_smbus_reset_enabled;
++   int is_generate_clock_pulses_enabled;
++   int is_force_stop_enabled;
++   int num_clock_pulses;
++   int frequency;
++} bus_recovery_info_T;
++
++/**************************************************/
++/*               AMI Recovery End                */
++/**************************************************/
++
++
++
++
++
+ #endif /* _LINUX_I2C_H */
+--- linux-5.4.85/include/uapi/linux/i2c-dev.h	2021-04-15 16:09:01.885378087 +0800
++++ linux-5.4.85-new/include/uapi/linux/i2c-dev.h	2021-04-22 13:47:39.862489746 +0800
+@@ -53,6 +53,26 @@
+ #define I2C_SMBUS	0x0720	/* SMBus transfer */
+ 
+ 
++
++
++
++/* Extended IOCTLS - Implemented in i2c-core and hardware */
++#define I2C_SLAVEREAD      0x0750  /* Perform Slave Read   */
++#define I2C_SLAVEWRITE     0x0751  /* Perform Slave Write  */
++#define I2C_SET_HOST_ADDR  0x0752  /* Set Slave Address of the Controller */
++#define I2C_GET_HOST_ADDR  0x0753  /* Get Slave Address of the Controller */
++#define I2C_SET_REC_INFO   0x0754  /* Set Recovery Parameters */
++#define I2C_GET_REC_INFO   0x0755  /* Get Recovery Parameters */
++#define I2C_RESET      0x0756  /* Reset Controller */
++#define SMBUS_HOST_NOTIFY  0x0757 /* Perform SMBus Host Notify Protocol */
++#define I2C_SET_SPEED      0x0758  /* Set I2C Bus Speed */
++#define I2C_GET_LINK_STATE      0x0759  /* Get the Status of Clk/Data pin*/
++#define I2C_BUS_TEST            0x0850  /* Perform the I2C Bus test*/
++#define I2C_MCTP_READ           0x0851  /* Perform MCTP Pkt Read*/
++
++
++
++
+ /* This is the structure as used in the I2C_SMBUS ioctl call */
+ struct i2c_smbus_ioctl_data {
+ 	__u8 read_write;
+--- linux-5.4.85/include/uapi/linux/i2c.h	2021-04-15 16:09:01.885378087 +0800
++++ linux-5.4.85-new/include/uapi/linux/i2c.h	2021-04-22 13:47:57.398100140 +0800
+@@ -131,7 +131,8 @@
+ /*
+  * Data for SMBus Messages
+  */
+-#define I2C_SMBUS_BLOCK_MAX	32	/* As specified in SMBus standard */
++//#define I2C_SMBUS_BLOCK_MAX	32	/* As specified in SMBus standard */
++#define I2C_SMBUS_BLOCK_MAX	240	/* As specified in SMBus standard */
+ union i2c_smbus_data {
+ 	__u8 byte;
+ 	__u16 word;
+--- linux-5.4.85/drivers/i2c/i2c-slave-read.c	1970-01-01 08:00:00.000000000 +0800
++++ linux-5.4.85-new/drivers/i2c/i2c-slave-read.c	2021-04-22 13:45:24.141503933 +0800
+@@ -0,0 +1,207 @@
++#include <linux/i2c.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/sysfs.h>
++
++#define MQ_MSGBUF_SIZE		128
++#define MQ_QUEUE_SIZE		32
++#define MQ_QUEUE_NEXT(x)	(((x) + 1) & (MQ_QUEUE_SIZE - 1))
++
++struct mq_msg {
++	int	len;
++	u8	*buf;
++};
++
++struct mq_queue {
++	struct bin_attribute	bin;
++	struct kernfs_node	*kn;
++
++	spinlock_t		lock; /* spinlock for queue index handling */
++	int			in;
++	int			out;
++
++	struct mq_msg		*curr;
++	int			truncated; /* drop current if truncated */
++	struct mq_msg		queue[MQ_QUEUE_SIZE];
++};
++
++static int i2c_slave_mqueue_callback(struct i2c_client *client,
++				     enum i2c_slave_event event, u8 *val)
++{
++	struct mq_queue *mq = i2c_get_clientdata(client);
++	struct mq_msg *msg = mq->curr;
++	int ret = 0;
++
++	switch (event) {
++	case I2C_SLAVE_WRITE_REQUESTED:
++		mq->truncated = 0;
++
++		msg->len = 1;
++		msg->buf[0] = client->addr << 1;
++		break;
++
++	case I2C_SLAVE_WRITE_RECEIVED:
++		if (msg->len < MQ_MSGBUF_SIZE) {
++			msg->buf[msg->len++] = *val;
++		} else {
++			dev_err(&client->dev, "message is truncated!\n");
++			mq->truncated = 1;
++			ret = -EINVAL;
++		}
++		break;
++
++	case I2C_SLAVE_STOP:
++		if (unlikely(mq->truncated || msg->len < 2))
++			break;
++
++		spin_lock(&mq->lock);
++		mq->in = MQ_QUEUE_NEXT(mq->in);
++		mq->curr = &mq->queue[mq->in];
++		mq->curr->len = 0;
++
++		/* Flush the oldest message */
++		if (mq->out == mq->in)
++			mq->out = MQ_QUEUE_NEXT(mq->out);
++		spin_unlock(&mq->lock);
++
++		kernfs_notify(mq->kn);
++		break;
++
++	default:
++		*val = 0xFF;
++		break;
++	}
++
++	return ret;
++}
++
++static ssize_t i2c_slave_mqueue_bin_read(struct file *filp,
++					 struct kobject *kobj,
++					 struct bin_attribute *attr,
++					 char *buf, loff_t pos, size_t count)
++{
++	struct mq_queue *mq;
++	struct mq_msg *msg;
++	unsigned long flags;
++	bool more = false;
++	ssize_t ret = 0;
++
++	mq = dev_get_drvdata(container_of(kobj, struct device, kobj));
++
++	spin_lock_irqsave(&mq->lock, flags);
++	if (mq->out != mq->in) {
++		msg = &mq->queue[mq->out];
++
++		if (msg->len <= count) {
++			ret = msg->len;
++			memcpy(buf, msg->buf, ret);
++		} else {
++			ret = -EOVERFLOW; /* Drop this HUGE one. */
++		}
++
++		mq->out = MQ_QUEUE_NEXT(mq->out);
++		if (mq->out != mq->in)
++			more = true;
++	}
++	spin_unlock_irqrestore(&mq->lock, flags);
++
++	if (more)
++		kernfs_notify(mq->kn);
++
++	return ret;
++}
++
++static int i2c_slave_mqueue_probe(struct i2c_client *client,
++				  const struct i2c_device_id *id)
++{
++	struct device *dev = &client->dev;
++	struct mq_queue *mq;
++	int ret, i;
++	void *buf;
++
++	mq = devm_kzalloc(dev, sizeof(*mq), GFP_KERNEL);
++	if (!mq)
++		return -ENOMEM;
++
++	BUILD_BUG_ON(!is_power_of_2(MQ_QUEUE_SIZE));
++
++	buf = devm_kmalloc_array(dev, MQ_QUEUE_SIZE, MQ_MSGBUF_SIZE,
++				 GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	for (i = 0; i < MQ_QUEUE_SIZE; i++)
++		mq->queue[i].buf = buf + i * MQ_MSGBUF_SIZE;
++
++	i2c_set_clientdata(client, mq);
++
++	spin_lock_init(&mq->lock);
++	mq->curr = &mq->queue[0];
++
++	sysfs_bin_attr_init(&mq->bin);
++	mq->bin.attr.name = "slave-mqueue";
++	mq->bin.attr.mode = 0400;
++	mq->bin.read = i2c_slave_mqueue_bin_read;
++	mq->bin.size = MQ_MSGBUF_SIZE * MQ_QUEUE_SIZE;
++
++	ret = sysfs_create_bin_file(&dev->kobj, &mq->bin);
++	if (ret)
++		return ret;
++
++	mq->kn = kernfs_find_and_get(dev->kobj.sd, mq->bin.attr.name);
++	if (!mq->kn) {
++		sysfs_remove_bin_file(&dev->kobj, &mq->bin);
++		return -EFAULT;
++	}
++
++	ret = i2c_slave_register(client, i2c_slave_mqueue_callback);
++	if (ret) {
++		kernfs_put(mq->kn);
++		sysfs_remove_bin_file(&dev->kobj, &mq->bin);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int i2c_slave_mqueue_remove(struct i2c_client *client)
++{
++	struct mq_queue *mq = i2c_get_clientdata(client);
++
++	i2c_slave_unregister(client);
++
++	kernfs_put(mq->kn);
++	sysfs_remove_bin_file(&client->dev.kobj, &mq->bin);
++
++	return 0;
++}
++
++static const struct i2c_device_id i2c_slave_mqueue_id[] = {
++	{ "slave-mqueue", 0 },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, i2c_slave_mqueue_id);
++
++static const struct of_device_id i2c_slave_of_match[] = {
++	{ .compatible = "slave-ipmb", },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, i2c_slave_of_match);
++
++static struct i2c_driver i2c_slave_mqueue_driver = {
++	.driver = {
++		.name	= "i2c-slave-mqueue",
++		.of_match_table = i2c_slave_of_match,
++	},
++	.probe		= i2c_slave_mqueue_probe,
++	.remove		= i2c_slave_mqueue_remove,
++	.id_table	= i2c_slave_mqueue_id,
++};
++module_i2c_driver(i2c_slave_mqueue_driver);
++
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR("Haiyue Wang <haiyue.wang at linux.intel.com>");
++MODULE_DESCRIPTION("I2C slave mode for receiving and queuing messages");
+--- linux-5.4.85/drivers/i2c/busses/i2c-fsi.c	2021-04-15 16:08:15.998300197 +0800
++++ linux-5.4.85-new/drivers/i2c/busses/i2c-fsi.c	2021-04-26 14:08:13.040843868 +0800
+@@ -703,7 +703,12 @@
+ 
+ 	for (port_no = 0; port_no < ports; port_no++) {
+ 		np = fsi_i2c_find_port_of_node(dev->of_node, port_no);
+-		if (np && !of_device_is_available(np))
++		/* Do not add port if it is not described in the device tree */
++		if (!np)
++			continue;
++
++		/* Do not add port if it is described as disabled */
++		if (!of_device_is_available(np))
+ 			continue;
+ 
+ 		port = kzalloc(sizeof(*port), GFP_KERNEL);
+--- linux-5.4.85/drivers/i2c/muxes/i2c-mux-pca954x.c	2021-04-15 16:08:16.114297869 +0800
++++ linux-5.4.85-new/drivers/i2c/muxes/i2c-mux-pca954x.c	2021-04-26 14:10:08.031547784 +0800
+@@ -244,7 +244,12 @@
+ 		regval = 1 << chan;
+ 
+ 	/* Only select the channel if its different from the last channel */
+-	if (data->last_chan != regval) {
++	if ((data->last_chan != regval) ) 
++{
++		if(regval == 0)//don't close all of channels, it will cause mctp failed
++		{
++			regval = data->last_chan;
++		}
+ 		ret = pca954x_reg_write(muxc->parent, client, regval);
+ 		data->last_chan = ret < 0 ? 0 : regval;
+ 	}

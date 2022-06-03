@@ -1,0 +1,62 @@
+diff -Naur old_kernel/drivers/mtd/spi-nor/aspeed-smc.c new_kernel/drivers/mtd/spi-nor/aspeed-smc.c
+--- old_kernel/drivers/mtd/spi-nor/aspeed-smc.c	2021-08-13 18:17:44.355018770 +0530
++++ new_kernel/drivers/mtd/spi-nor/aspeed-smc.c	2021-08-13 18:16:57.791230653 +0530
+@@ -1529,6 +1529,7 @@
+ 	struct device_node *child;
+ 	unsigned int cs;
+ 	u32 width = 0;
++	int chip_not_exist = -1;
+ 	int ret = -ENODEV;
+ 
+ 	for_each_available_child_of_node(np, child) {
+@@ -1615,6 +1616,18 @@
+ 				dev_info(dev, "chip %d does not exist.\n", cs);
+ 				devm_kfree(controller->dev, chip);
+ 				ret = 0;
++#if defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
++				/*
++				 * In case of Dual Image + Dedicated SPI Image, If FMC SPI#1 not 
++				 * detected or not available in board physically. Need to register
++				 * Mtd device 0 alone. Otherwise, Mtd device register for FMC SPI#0
++				 * will be skipped.
++				 */
++				if ((cs == 1) && (strncmp(mtd->name, "bmc", 3) == 0)) {
++					chip_not_exist = cs;
++					goto finish_mtd_register;
++				}
++#endif
+ 				continue;
+ 			} else
+ 				break;
+@@ -1650,6 +1663,31 @@
+                                         break;
+                                 }
+                         }
++
++finish_mtd_register:
++			if (chip_not_exist == 1) {
++				/* 
++				 * Incase of MTD device 1 unavailablity, Concat Need to performed
++				 * for MTD device 0 alone, As sub partitions from spx-fmh will be 
++				 * registered in mtdconcat and spx-fmh does not available in dts
++				 * for dual image + dedicated spi configuration.
++				 */
++                                concat_mtd = mtd_concat_create(bmc_mtd, 1, "ahb:mtdconcat@0");
++                                if (!concat_mtd) {
++                                        printk("ERROR: init_ractrends_flash: flash concat failed\n");
++                                        return -ENXIO;
++                                }
++
++                                ret = mtd_device_register(concat_mtd, NULL, 0);
++                                if (ret) {
++                                        printk("mtd_device_register error");
++                                        break;
++                                }
++
++				chip_not_exist = -1;
++
++				continue;
++			}
+                 }
+                 else
+                 {

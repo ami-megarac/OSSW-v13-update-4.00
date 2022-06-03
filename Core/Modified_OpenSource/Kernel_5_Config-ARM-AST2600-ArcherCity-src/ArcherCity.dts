@@ -1,0 +1,1000 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2019 IBM Corp.
+
+/dts-v1/;
+
+#include "projdef.h"
+#include "aspeed-g6.dtsi"
+#include <dt-bindings/gpio/aspeed-gpio.h>
+#include <dt-bindings/i2c/i2c.h>
+#include "../../../../../../include/projdef.h"
+
+/ {
+	model = "AST2600 EVB";
+	compatible = "aspeed,ast2600";
+
+	aliases {
+		serial0 = &uart1;
+		serial1 = &uart2;
+		serial2 = &uart3;
+		serial3 = &uart4;
+		serial4 = &uart5;
+	};
+
+	chosen {
+		bootargs = "console=ttyS4,115200n8";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x40000000>;
+	};
+	
+    reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		gfx_memory: framebuffer {
+			size = <0x01000000>;
+			alignment = <0x01000000>;
+			compatible = "shared-dma-pool";
+			reusable;
+		};
+            
+		ssp_memory: ssp_memory {
+			size = <0x00200000>;
+			alignment = <0x00100000>;
+			compatible = "shared-dma-pool";
+			no-map;
+		};     
+		
+		linux,cma {
+				size = <0x4000000>; //64MB
+				alignment = <0x01000000>;
+				compatible = "shared-dma-pool";
+				reusable;
+				linux,cma-default;
+		};
+     };
+
+
+
+    iio-hwmon {
+        compatible = "iio-hwmon";
+        io-channels = <&adc0 0>, <&adc0 1>, <&adc0 2>, <&adc0 3>,
+                        <&adc0 4>, <&adc0 5>, <&adc0 6>, <&adc0 7>,
+                        <&adc1 0>, <&adc1 1>, <&adc1 2>, <&adc1 3>,
+                        <&adc1 4>, <&adc1 5>, <&adc1 6>, <&adc1 7>;
+    };
+
+	fan0: pwm-fan0 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 0 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan1: pwm-fan1 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 1 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan2: pwm-fan2 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 2 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan3: pwm-fan3 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 3 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan4: pwm-fan4 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 4 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan5: pwm-fan5 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 5 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan6: pwm-fan6 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 12 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan7: pwm-fan7 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 13 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+	
+	fan8: pwm-fan8 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 14 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};
+
+	fan9: pwm-fan9 {
+		compatible = "pwm-fan";
+		pwms = <&pwm 15 40000 0>;	/* Target freq:25 kHz */
+		cooling-min-state = <0>;
+		cooling-max-state = <3>;
+		#cooling-cells = <2>;
+		cooling-levels = <0 15 128 255>;
+	};	
+};
+#if defined(CONFIG_SPX_FEATURE_ENABLE_SSP)
+&ssp {
+	memory-region = <&ssp_memory>;
+};
+
+&ssp_tcm {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	ranges = <0 0x1a000000 0x2000>;
+	ssp-itcm@0 {
+		reg = <0x0 0x2000>;
+		protect-exec;
+	};
+};
+#endif
+
+&syscon {
+        uart-clock-high-speed;
+        status = "okay";
+};
+
+&kcs1 {
+        kcs_addr = <0xCA0>;
+        status = "okay";
+};
+
+&kcs2 {
+        kcs_addr = <0xCA8>;
+        status = "okay";
+};
+
+&kcs3 {
+        kcs_addr = <0xCA2>;
+        status = "okay";
+};
+
+&peci0 {
+    status = "okay";
+};
+
+&espi_ctrl {
+	status = "okay";
+	perif,dma-mode;
+	oob,dma-mode;
+	oob,dma-tx-desc-num = <0x2>;
+	oob,dma-rx-desc-num = <0x8>;
+	flash,dma-mode;
+};
+
+&lpc_reset {
+        status = "okay";
+};
+
+&jtag0 {
+        status = "okay";
+};
+
+&jtag1 {
+        status = "okay";
+};
+
+#ifdef CONFIG_SPX_FEATURE_GLOBAL_INTEL_REMOTE_DBG_SUPPORT
+&asd_jtag0 {
+        status = "okay";
+};
+
+&asd_jtag1 {
+        status = "okay";
+};
+#endif
+
+&mctp0 {
+    tx-payload-bytes= <64>;
+    rx-payload-bytes= <64>;
+    status = "okay";
+};
+&lpc_sio {
+        status = "okay";
+};
+
+&lpc_snoop {
+        snoop-ports = <0x80>;
+        status = "okay";
+};
+
+&lpc_pcc { 
+	rec-mode = <0x1>; 
+	port-addr = <0x80>; 
+	port-addr-hbits-select = <0x1>; 
+	port-addr-xbits = <0x1>; 
+	pattern-a-en; 
+	pattern-a = <0x41424344>; 
+	pattern-a-len = <0x4>; 
+	pattern-a-write = <0x1>; 
+	pattern-a-port = <0x80>; 
+	status = "okay"; 
+};
+
+&mdio0 {
+        status = "okay";
+
+        ethphy0: ethernet-phy@0 {
+                compatible = "ethernet-phy-ieee802.3-c22";
+                reg = <0>;
+        };
+};
+
+&mdio1 {
+	status = "okay";
+
+	ethphy1: ethernet-phy@0 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0>;
+	};
+};
+
+&mdio2 {
+	status = "okay";
+
+	ethphy2: ethernet-phy@0 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0>;
+	};
+};
+
+&mdio3 {
+	status = "okay";
+
+	ethphy3: ethernet-phy@0 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0>;
+	};
+};
+
+&mac0 {
+        status = "disable";
+
+        phy-mode = "rgmii";
+        phy-handle = <&ethphy0>;
+
+        pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_rgmii1_default>;
+};
+
+&mac1 {
+	status = "okay";
+
+	phy-mode = "rgmii";
+	phy-handle = <&ethphy1>;
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_rgmii2_default>;
+};
+
+&mac2 {
+	status = "disable";
+
+	phy-mode = "rgmii";
+	phy-handle = <&ethphy2>;
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_rgmii3_default>;
+};
+
+&adc0 {
+	vref = <2500>;
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_adc0_default &pinctrl_adc1_default
+		&pinctrl_adc2_default &pinctrl_adc3_default
+		&pinctrl_adc4_default &pinctrl_adc5_default
+		&pinctrl_adc6_default &pinctrl_adc7_default>;
+};
+
+&adc1 {
+	vref = <2500>;
+	status = "okay";
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_adc8_default &pinctrl_adc9_default
+		&pinctrl_adc10_default &pinctrl_adc11_default
+		&pinctrl_adc12_default &pinctrl_adc13_default
+		&pinctrl_adc14_default &pinctrl_adc15_default>;
+};
+
+&sdc {
+	status = "okay";	
+};
+
+&gfx {
+        status = "okay";
+        memory-region = <&gfx_memory>;
+};
+
+&emmc_controller {
+	status = "okay";
+	timing-phase = <0x700FF>;
+};
+
+&emmc {
+    status = "okay";
+    non-removable;
+    max-frequency = <100000000>;
+    sdhci-drive-type = /bits/ 8 <3>;
+#if 1
+    bus-width = <4>;
+#else
+    bus-width = <8>;
+    pinctrl-0 = <&pinctrl_emmc_default
+            &pinctrl_emmcg8_default>;
+#endif
+
+};
+
+&sdc {
+	status = "okay";
+	timing-phase = <0xc6ffff>;
+};
+
+&sdhci0 {
+    status = "okay";
+    bus-width = <4>;
+    max-frequency = <100000000>;
+    sdhci-drive-type = /bits/ 8 <3>;
+    /* SDR104/DDR50/SDR50 bits in CAPA2 is not supported */
+    sdhci-caps-mask = <0x7 0x580000>;
+    sdhci,wp-inverted;
+};
+
+#ifndef CONFIG_SPX_FEATURE_GLOBAL_INTEL_REMOTE_DBG_SUPPORT
+#if !defined(CONFIG_SPX_FEATURE_ENABLE_SSP)
+&sdhci1 {
+    status = "okay";
+    bus-width = <4>;
+    max-frequency = <100000000>;
+    sdhci-drive-type = /bits/ 8 <3>;
+    sdhci-caps-mask = <0x7 0x580000>;
+    sdhci,wp-inverted;
+};
+#endif
+#endif
+
+&rtc {
+	status = "okay";
+};
+
+&fmc {
+	status = "okay";
+	flash@0 {
+		status = "okay";
+		m25p,fast-read;
+		label = "bmc";
+		spi-max-frequency = <50000000>;
+        partitions {
+            compatible = "ami,spx-fmh";
+        };
+	};
+};
+
+&spi1 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_spi1_default>;
+
+	flash@0 {
+		status = "okay";
+		m25p,fast-read;
+		label = "pnor";
+		spi-max-frequency = <50000000>;
+	};
+};
+
+#ifndef CONFIG_SPX_FEATURE_GLOBAL_INTEL_REMOTE_DBG_SUPPORT
+&uart3 {
+	status = "okay";
+};
+#endif
+
+&uart4 {
+	status = "okay";
+};
+
+&uart5 {
+	status = "okay";
+};
+
+#if defined(CONFIG_SPX_FEATURE_ENABLE_SSP)
+&uart7 {
+	status = "okay";
+};
+#endif
+
+&i3cglobal {
+	status = "okay";
+};
+
+&i3c0 {
+	/* I3C_SPD_DDRABCD_CPU0_BMC */
+	status = "okay";
+	jdec-spd;
+
+	/* Renesas SPD5118 */
+	spd5118_0_0: spd@50,3C000000000 {
+		reg = <0x50 0x3C0 0x00000000>;
+		assigned-address = <0x50>;
+	};
+
+	nvdimm_0_0: nvm@58,3C0000000008 {
+		reg = <0x58 0x3C0 0x00000008>;
+		assigned-address = <0x58>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_1: spd@51,3C000000001 {
+		reg = <0x51 0x3C0 0x00000001>;
+		assigned-address = <0x51>;
+	};
+
+	nvdimm_0_1: nvm@59,3C0000000009 {
+		reg = <0x59 0x3C0 0x00000009>;
+		assigned-address = <0x59>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_2: spd@52,3C000000002 {
+		reg = <0x52 0x3C0 0x00000002>;
+		assigned-address = <0x52>;
+	};
+
+	nvdimm_0_2: nvm@5A,3C000000000A {
+		reg = <0x5A 0x3C0 0x0000000A>;
+		assigned-address = <0x5A>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_3: spd@53,3C000000003 {
+		reg = <0x53 0x3C0 0x00000003>;
+		assigned-address = <0x53>;
+	};
+
+	nvdimm_0_3: nvm@5B,3C000000000B {
+		reg = <0x5B 0x3C0 0x0000000B>;
+		assigned-address = <0x5B>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_4: spd@54,3C000000004 {
+		reg = <0x54 0x3C0 0x00000004>;
+		assigned-address = <0x54>;
+	};
+
+	nvdimm_0_4: nvm@5C,3C000000000C {
+		reg = <0x5C 0x3C0 0x0000000C>;
+		assigned-address = <0x5C>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_5: spd@55,3C000000005 {
+		reg = <0x55 0x3C0 0x00000005>;
+		assigned-address = <0x55>;
+	};
+
+	nvdimm_0_5: nvm@5D,3C000000000D {
+		reg = <0x5D 0x3C0 0x0000000D>;
+		assigned-address = <0x5D>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_6: spd@56,3C000000006 {
+		reg = <0x56 0x3C0 0x00000006>;
+		assigned-address = <0x56>;
+	};
+
+	nvdimm_0_6: nvm@5E,3C000000000E {
+		reg = <0x5E 0x3C0 0x0000000E>;
+		assigned-address = <0x5E>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_0_7: spd@57,3C000000007 {
+		reg = <0x57 0x3C0 0x00000007>;
+		assigned-address = <0x57>;
+	};
+
+	nvdimm_0_7: nvm@5F,3C000000000F {
+		reg = <0x5F 0x3C0 0x0000000F>;
+		assigned-address = <0x5F>;
+	};
+};
+
+&i3c1 {
+	/* I3C_SPD_DDREFGH_CPU0_BMC */
+	status = "okay";
+	jdec-spd;
+
+	/* Renesas SPD5118 */
+	spd5118_1_0: spd@50,3C000000000 {
+		reg = <0x50 0x3C0 0x00000000>;
+		assigned-address = <0x50>;
+	};
+
+	nvdimm_1_0: nvm@58,3C0000000008 {
+		reg = <0x58 0x3C0 0x00000008>;
+		assigned-address = <0x58>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_1: spd@51,3C000000001 {
+		reg = <0x51 0x3C0 0x00000001>;
+		assigned-address = <0x51>;
+	};
+
+	nvdimm_1_1: nvm@59,3C0000000009 {
+		reg = <0x59 0x3C0 0x00000009>;
+		assigned-address = <0x59>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_2: spd@52,3C000000002 {
+		reg = <0x52 0x3C0 0x00000002>;
+		assigned-address = <0x52>;
+	};
+
+	nvdimm_1_2: nvm@5A,3C000000000A {
+		reg = <0x5A 0x3C0 0x0000000A>;
+		assigned-address = <0x5A>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_3: spd@53,3C000000003 {
+		reg = <0x53 0x3C0 0x00000003>;
+		assigned-address = <0x53>;
+	};
+
+	nvdimm_1_3: nvm@5B,3C000000000B {
+		reg = <0x5B 0x3C0 0x0000000B>;
+		assigned-address = <0x5B>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_4: spd@54,3C000000004 {
+		reg = <0x54 0x3C0 0x00000004>;
+		assigned-address = <0x54>;
+	};
+
+	nvdimm_1_4: nvm@5C,3C000000000C {
+		reg = <0x5C 0x3C0 0x0000000C>;
+		assigned-address = <0x5C>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_5: spd@55,3C000000005 {
+		reg = <0x55 0x3C0 0x00000005>;
+		assigned-address = <0x55>;
+	};
+
+	nvdimm_1_5: nvm@5D,3C000000000D {
+		reg = <0x5D 0x3C0 0x0000000D>;
+		assigned-address = <0x5D>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_6: spd@56,3C000000006 {
+		reg = <0x56 0x3C0 0x00000006>;
+		assigned-address = <0x56>;
+	};
+
+	nvdimm_1_6: nvm@5E,3C000000000E {
+		reg = <0x5E 0x3C0 0x0000000E>;
+		assigned-address = <0x5E>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_1_7: spd@57,3C000000007 {
+		reg = <0x57 0x3C0 0x00000007>;
+		assigned-address = <0x57>;
+	};
+
+	nvdimm_1_7: nvm@5F,3C000000000F {
+		reg = <0x5F 0x3C0 0x0000000F>;
+		assigned-address = <0x5F>;
+	};
+};
+
+&i3c2 {
+	/* I3C_SPD_DDRABCD_CPU1_BMC */
+	status = "okay";
+	jdec-spd;
+
+	/* Renesas SPD5118 */
+	spd5118_2_0: spd@50,3C000000000 {
+		reg = <0x50 0x3C0 0x00000000>;
+		assigned-address = <0x50>;
+	};
+
+	nvdimm_2_0: nvm@58,3C0000000008 {
+		reg = <0x58 0x3C0 0x00000008>;
+		assigned-address = <0x58>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_1: spd@51,3C000000001 {
+		reg = <0x51 0x3C0 0x00000001>;
+		assigned-address = <0x51>;
+	};
+
+	nvdimm_2_1: nvm@59,3C0000000009 {
+		reg = <0x59 0x3C0 0x00000009>;
+		assigned-address = <0x59>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_2: spd@52,3C000000002 {
+		reg = <0x52 0x3C0 0x00000002>;
+		assigned-address = <0x52>;
+	};
+
+	nvdimm_2_2: nvm@5A,3C000000000A {
+		reg = <0x5A 0x3C0 0x0000000A>;
+		assigned-address = <0x5A>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_3: spd@53,3C000000003 {
+		reg = <0x53 0x3C0 0x00000003>;
+		assigned-address = <0x53>;
+	};
+
+	nvdimm_2_3: nvm@5B,3C000000000B {
+		reg = <0x5B 0x3C0 0x0000000B>;
+		assigned-address = <0x5B>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_4: spd@54,3C000000004 {
+		reg = <0x54 0x3C0 0x00000004>;
+		assigned-address = <0x54>;
+	};
+
+	nvdimm_2_4: nvm@5C,3C000000000C {
+		reg = <0x5C 0x3C0 0x0000000C>;
+		assigned-address = <0x5C>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_5: spd@55,3C000000005 {
+		reg = <0x55 0x3C0 0x00000005>;
+		assigned-address = <0x55>;
+	};
+
+	nvdimm_2_5: nvm@5D,3C000000000D {
+		reg = <0x5D 0x3C0 0x0000000D>;
+		assigned-address = <0x5D>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_6: spd@56,3C000000006 {
+		reg = <0x56 0x3C0 0x00000006>;
+		assigned-address = <0x56>;
+	};
+
+	nvdimm_2_6: nvm@5E,3C000000000E {
+		reg = <0x5E 0x3C0 0x0000000E>;
+		assigned-address = <0x5E>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_2_7: spd@57,3C000000007 {
+		reg = <0x57 0x3C0 0x00000007>;
+		assigned-address = <0x57>;
+	};
+
+	nvdimm_2_7: nvm@5F,3C000000000F {
+		reg = <0x5F 0x3C0 0x0000000F>;
+		assigned-address = <0x5F>;
+	};
+};
+
+&i3c3 {
+	/* I3C_SPD_DDREFGH_CPU1_BMC */
+	status = "okay";
+	jdec-spd;
+
+	/* Renesas SPD5118 */
+	spd5118_3_0: spd@50,3C000000000 {
+		reg = <0x50 0x3C0 0x00000000>;
+		assigned-address = <0x50>;
+	};
+
+	nvdimm_3_0: nvm@58,3C0000000008 {
+		reg = <0x58 0x3C0 0x00000008>;
+		assigned-address = <0x58>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_1: spd@51,3C000000001 {
+		reg = <0x51 0x3C0 0x00000001>;
+		assigned-address = <0x51>;
+	};
+
+	nvdimm_3_1: nvm@59,3C0000000009 {
+		reg = <0x59 0x3C0 0x00000009>;
+		assigned-address = <0x59>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_2: spd@52,3C000000002 {
+		reg = <0x52 0x3C0 0x00000002>;
+		assigned-address = <0x52>;
+	};
+
+	nvdimm_3_2: nvm@5A,3C000000000A {
+		reg = <0x5A 0x3C0 0x0000000A>;
+		assigned-address = <0x5A>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_3: spd@53,3C000000003 {
+		reg = <0x53 0x3C0 0x00000003>;
+		assigned-address = <0x53>;
+	};
+
+	nvdimm_3_3: nvm@5B,3C000000000B {
+		reg = <0x5B 0x3C0 0x0000000B>;
+		assigned-address = <0x5B>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_4: spd@54,3C000000004 {
+		reg = <0x54 0x3C0 0x00000004>;
+		assigned-address = <0x54>;
+	};
+
+	nvdimm_3_4: nvm@5C,3C000000000C {
+		reg = <0x5C 0x3C0 0x0000000C>;
+		assigned-address = <0x5C>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_5: spd@55,3C000000005 {
+		reg = <0x55 0x3C0 0x00000005>;
+		assigned-address = <0x55>;
+	};
+
+	nvdimm_3_5: nvm@5D,3C000000000D {
+		reg = <0x5D 0x3C0 0x0000000D>;
+		assigned-address = <0x5D>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_6: spd@56,3C000000006 {
+		reg = <0x56 0x3C0 0x00000006>;
+		assigned-address = <0x56>;
+	};
+
+	nvdimm_3_6: nvm@5E,3C000000000E {
+		reg = <0x5E 0x3C0 0x0000000E>;
+		assigned-address = <0x5E>;
+	};
+
+	/* Renesas SPD5118 */
+	spd5118_3_7: spd@57,3C000000007 {
+		reg = <0x57 0x3C0 0x00000007>;
+		assigned-address = <0x57>;
+	};
+
+	nvdimm_3_7: nvm@5F,3C000000000F {
+		reg = <0x5F 0x3C0 0x0000000F>;
+		assigned-address = <0x5F>;
+	};
+};
+&i2c0 {
+	status = "okay";
+};
+
+&i2c1 {
+	status = "okay";
+};
+
+&i2c2 {
+	status = "okay";
+};
+
+&i2c3 {
+	status = "okay";
+};
+
+&i2c4 {
+	status = "okay";
+};
+
+&i2c5 {
+	status = "okay";
+};
+
+&i2c6 {
+	status = "okay";
+};
+
+&i2c7 {
+	status = "okay";
+};
+
+&i2c8 {
+	status = "okay";
+};
+
+&i2c9 {
+	status = "okay";
+};
+
+&i2c12 {
+	status = "okay";
+};
+
+&i2c13 {
+	status = "okay";
+};
+
+#ifndef CONFIG_SPX_FEATURE_GLOBAL_INTEL_REMOTE_DBG_SUPPORT
+&i2c14 {
+	status = "okay";
+};
+#endif
+
+&i2c15 {
+	status = "okay";
+};
+
+&fsim0 {
+	status = "okay";
+};
+&sgpiom0 {
+        status = "okay";
+};
+
+&pwm {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_pwm0_default
+			&pinctrl_pwm1_default
+			&pinctrl_pwm2_default
+			&pinctrl_pwm3_default
+			&pinctrl_pwm4_default
+			&pinctrl_pwm5_default
+			&pinctrl_pwm12g1_default
+			&pinctrl_pwm13g1_default
+			&pinctrl_pwm14g1_default
+			&pinctrl_pwm15g1_default>;
+};
+
+&tach {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_tach0_default
+			&pinctrl_tach1_default
+			&pinctrl_tach2_default
+			&pinctrl_tach3_default
+			&pinctrl_tach4_default
+			&pinctrl_tach5_default
+			&pinctrl_tach6_default
+			&pinctrl_tach7_default
+			&pinctrl_tach8_default
+			&pinctrl_tach9_default>;
+	fan@0 {
+		reg = <0x00>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@1 {
+		reg = <0x01>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@2 {
+		reg = <0x02>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@3 {
+		reg = <0x03>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@4 {
+		reg = <0x04>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@5 {
+		reg = <0x05>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@6 {
+		reg = <0x06>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@7 {
+		reg = <0x07>;
+		aspeed,pulse-pr = <2>;
+	};
+	
+	fan@8 {
+		reg = <0x08>;
+		aspeed,pulse-pr = <2>;
+	};
+
+	fan@9 {
+		reg = <0x09>;
+		aspeed,pulse-pr = <2>;
+	};	
+};
+
+#ifdef CONFIG_SPX_FEATURE_USB_PORT_B_HOST_SUPPORT
+&ehci1 {
+        status = "okay";
+};
+
+&uhci {
+        status = "okay";
+};
+#endif
+
+&vhub {
+        status = "okay";
+};
+
+#ifdef CONFIG_SPX_FEATURE_USB_PORT_B_SUPPORT
+&udc {
+        status = "okay";
+        pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_usb2bd_default>;
+};
+#endif
+
+#include "legacy.dtsi" /* For Legacy AMI Drivers */
+

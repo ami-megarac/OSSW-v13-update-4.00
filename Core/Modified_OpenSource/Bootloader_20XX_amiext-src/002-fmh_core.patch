@@ -1396,7 +1396,7 @@
 +								le32_to_host(mod->Module_Size),
 +								startaddress+le32_to_host(mod->Module_Location),
 +								le32_to_host(mod->Module_Load_Address));
-+					ret = spi_flash_read(flash, le32_to_host(mod->Module_Location), le32_to_host(mod->Module_Size), (void *)le32_to_host(mod->Module_Load_Address));
++					ret = spi_flash_read(flash, startaddress + le32_to_host(mod->Module_Location), le32_to_host(mod->Module_Size), (void *)le32_to_host(mod->Module_Load_Address));
 +					if(ret)
 +					{
 +						puts("Error in reading SPI\n");

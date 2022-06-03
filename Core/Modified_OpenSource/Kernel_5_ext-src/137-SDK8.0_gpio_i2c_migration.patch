@@ -1,0 +1,129 @@
+diff -Naur linux_old/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi linux/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi
+--- linux_old/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi	2022-03-21 12:13:00.043156000 +0800
++++ linux/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi	2022-03-07 15:12:07.000000000 +0800
+@@ -317,32 +317,32 @@
+ 		groups = "SI2C4";
+ 	};
+ 
+-	pinctrl_si2c5_default: si2c1_default {
++	pinctrl_si2c5_default: si2c5_default {
+ 		function = "SI2C5";
+ 		groups = "SI2C5";
+ 	};
+ 
+-	pinctrl_si2c1_default: si2c1_default {
++	pinctrl_si2c6_default: si2c6_default {
+ 		function = "SI2C6";
+ 		groups = "SI2C6";
+ 	};
+ 
+-	pinctrl_si2c1_default: si2c1_default {
++	pinctrl_si2c7_default: si2c7_default {
+ 		function = "SI2C7";
+ 		groups = "SI2C7";
+ 	};
+ 
+-	pinctrl_si2c1_default: si2c1_default {
++	pinctrl_si2c8_default: si2c8_default {
+ 		function = "SI2C8";
+ 		groups = "SI2C8";
+ 	};
+ 
+-	pinctrl_si2c1_default: si2c1_default {
++	pinctrl_si2c9_default: si2c9_default {
+ 		function = "SI2C9";
+ 		groups = "SI2C9";
+ 	};
+ 
+-	pinctrl_si2c1_default: si2c1_default {
++	pinctrl_si2c10_default: si2c10_default {
+ 		function = "SI2C10";
+ 		groups = "SI2C10";
+ 	};
+--- linux/drivers/gpio/gpio-aspeed.c	2022-03-28 14:50:51.520012796 +0800
++++ linux-5.4.184/drivers/gpio/gpio-aspeed.c	2022-03-31 13:44:57.053862909 +0800
+@@ -487,10 +487,10 @@
+ 	u32 val;
+ 
+ 	if (!have_input(gpio, offset))
+-		return 0;
++		return GPIO_LINE_DIRECTION_OUT;
+ 
+ 	if (!have_output(gpio, offset))
+-		return 1;
++		return GPIO_LINE_DIRECTION_IN;
+ 
+ 	raw_spin_lock_irqsave(&gpio->lock, flags);
+ 
+@@ -498,7 +498,7 @@
+ 
+ 	raw_spin_unlock_irqrestore(&gpio->lock, flags);
+ 
+-	return !val;
++	return val ? GPIO_LINE_DIRECTION_OUT : GPIO_LINE_DIRECTION_IN;
+ 
+ }
+ 
+@@ -612,16 +612,16 @@
+ 	switch (type & IRQ_TYPE_SENSE_MASK) {
+ 	case IRQ_TYPE_EDGE_BOTH:
+ 		type2 |= bit;
+-		/* fall through */
++		fallthrough;
+ 	case IRQ_TYPE_EDGE_RISING:
+ 		type0 |= bit;
+-		/* fall through */
++		fallthrough;
+ 	case IRQ_TYPE_EDGE_FALLING:
+ 		handler = handle_edge_irq;
+ 		break;
+ 	case IRQ_TYPE_LEVEL_HIGH:
+ 		type0 |= bit;
+-		/* fall through */
++		fallthrough;
+ 	case IRQ_TYPE_LEVEL_LOW:
+ 		type1 |= bit;
+ 		handler = handle_level_irq;
+diff -Naur linux_old/drivers/i2c/busses/ast2600-i2c-global.c linux/drivers/i2c/busses/ast2600-i2c-global.c
+--- linux_old/drivers/i2c/busses/ast2600-i2c-global.c	2022-03-08 16:08:06.240129000 +0800
++++ linux/drivers/i2c/busses/ast2600-i2c-global.c	2022-03-08 16:37:08.356152000 +0800
+@@ -45,9 +45,9 @@
+ 
+ static const struct aspeed_i2c_base_clk i2c_base_clk[BASE_CLK_COUNT] = {
+ 	/* name	target_freq */
+-	{  "base_clk3",	40000000 },	/* 40M */
++	{  "base_clk3",	20000000 },	/* 20M */
+ 	{  "base_clk2",	10000000 },	/* 10M */
+-	{  "base_clk1",	3250000 },	/* 33M */
++	{  "base_clk1",	3250000 },	/* 3.25M */
+ 	{  "base_clk0",	1000000 },	/* 1M */
+ };
+ 
+diff -Naur linux_old/drivers/i2c/busses/i2c-new-aspeed.c linux/drivers/i2c/busses/i2c-new-aspeed.c
+--- linux_old/drivers/i2c/busses/i2c-new-aspeed.c	2022-03-01 16:23:18.324893000 +0800
++++ linux/drivers/i2c/busses/i2c-new-aspeed.c	2022-03-07 17:13:16.000000000 +0800
+@@ -412,8 +412,9 @@
+ 			divisor += inc;
+ 		}
+ 		baseclk_idx &= 0xf;
+-		scl_high = ((divisor >> 1) - 1) & 0xf;
+-		scl_low = (divisor - scl_high - 2) & 0xf;
++		scl_low = ((divisor * 9) / 16) - 1;
++		scl_low = min_t(u32, scl_low, 0xf);
++		scl_high = (divisor - scl_low - 2) & 0xf;
+ 		/* Divisor : Base Clock : tCKHighMin : tCK High : tCK Low  */
+ 		data = ((scl_high - 1) << 20) | (scl_high << 16) | (scl_low << 12) | (baseclk_idx);
+ 	} else {
+diff -Naur linux_old/include/linux/gpio/driver.h linux/include/linux/gpio/driver.h
+--- linux_old/include/linux/gpio/driver.h	2021-06-03 14:59:17.000000000 +0800
++++ linux/include/linux/gpio/driver.h	2022-03-07 13:56:06.000000000 +0800
+@@ -22,6 +22,9 @@
+ 
+ struct gpio_chip;
+ 
++#define GPIO_LINE_DIRECTION_IN	1
++#define GPIO_LINE_DIRECTION_OUT	0
++
+ /**
+  * struct gpio_irq_chip - GPIO interrupt controller
+  */

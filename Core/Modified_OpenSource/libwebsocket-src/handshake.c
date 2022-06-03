@@ -23,6 +23,7 @@ SOFTWARE.
 #include "handshake.h"
 #include "errors.h"
 #include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <openssl/md5.h>
 #include <dlfcn.h>
 #include "Encode.h"
@@ -548,10 +549,13 @@ int parseHeaders(char *string, ws_client *n, int port){
 			unsigned char hashedKey[KEYSIZE];
 			concate(key1, key2, h->key3, unhashedKey);	
 
-			MD5_CTX ctx;
-			MD5_Init(&ctx);
-			MD5_Update(&ctx,unhashedKey,KEYSIZE);
-			MD5_Final(hashedKey,&ctx);
+			EVP_MD_CTX *mdctx = NULL;
+    			mdctx = EVP_MD_CTX_new();
+    			EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
+    			EVP_DigestUpdate(mdctx, unhashedKey, KEYSIZE);
+    			EVP_DigestFinal_ex(mdctx, hashedKey, NULL);
+    			EVP_MD_CTX_free(mdctx);
+
 			h->accept = getMemory((char *) hashedKey, KEYSIZE);
 			h->accept_len = KEYSIZE; 
 
@@ -578,7 +582,7 @@ int parseHeaders(char *string, ws_client *n, int port){
 		/**
 		 * Creating acceptkey from the key we recieved in the headers. 
 		 */
-		SHA_CTX stx;
+	//	SHA_CTX stx;
 		char* magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 		int magic_len = 36, length = magic_len + strlen(h->key);
 		char key[length];
@@ -592,9 +596,16 @@ int parseHeaders(char *string, ws_client *n, int port){
 		memcpy(key, h->key, (length-magic_len));
 		memcpy(key+(length-magic_len), magic, magic_len);
 
-		SHA1_Init(&stx);
-		SHA1_Update(&stx,(const unsigned char*) key,length);
-		SHA1_Final(sha1Key,&stx);
+		EVP_MD_CTX *sha1 = NULL;
+                sha1 = EVP_MD_CTX_new();
+                EVP_DigestInit_ex(sha1, EVP_sha1(), NULL);
+ 		EVP_DigestUpdate(sha1, (const unsigned char*) key,length);
+                EVP_DigestFinal_ex(sha1, sha1Key, NULL); 
+ 		EVP_MD_CTX_free(sha1);
+
+	//	SHA1_Init(&stx);
+	//	SHA1_Update(&stx,(const unsigned char*) key,length);
+	//	SHA1_Final(sha1Key,&stx);
 
 		char sha1Key_padding[20 + 1];
 		memset(sha1Key_padding, '\0', sizeof(sha1Key_padding));

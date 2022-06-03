@@ -1,0 +1,90 @@
+--- linux_org/drivers/tty/serial/8250/8250_aspeed.c	2021-09-11 13:44:38.789794760 +0800
++++ linux/drivers/tty/serial/8250/8250_aspeed.c	2021-09-11 13:44:43.000000000 +0800
+@@ -429,7 +429,7 @@
+ 
+ 	spin_lock_init(&port->lock);
+ 	port->dev = dev;
+-	port->type = PORT_16550;
++	port->type = PORT_16550A;
+ 	port->irq = irq;
+ 	port->line = of_alias_get_id(dev->of_node, "serial");
+ 	port->handle_irq = ast8250_handle_irq;
+@@ -439,10 +439,11 @@
+ 	port->uartclk = clk_get_rate(data->clk);
+ 	port->regshift = 2;
+ 	port->iotype = UPIO_MEM32;
+-	port->flags = UPF_FIXED_PORT | UPF_SHARE_IRQ;
++	port->flags = UPF_FIXED_TYPE | UPF_FIXED_PORT | UPF_SHARE_IRQ;
+ 	port->startup = ast8250_startup;
+ 	port->shutdown = ast8250_shutdown;
+ 	port->private_data = data;
++	uart.bugs |= UART_BUG_TXRACE;
+ 
+ 	data->line = serial8250_register_8250_port(&uart);
+ 	if (data->line < 0) {
+--- linux_org/drivers/tty/serial/8250/8250_port.c	2021-09-11 13:44:01.754158130 +0800
++++ linux/drivers/tty/serial/8250/8250_port.c	2021-09-11 13:44:14.000000000 +0800
+@@ -1744,6 +1744,18 @@
+ 	count = up->tx_loadsz;
+ 	do {
+ 		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
++		if (up->bugs & UART_BUG_TXRACE) {
++			/*
++			 * The Aspeed BMC virtual UARTs have a bug where data
++			 * may get stuck in the BMC's Tx FIFO from bursts of
++			 * writes on the APB interface.
++			 *
++			 * Delay back-to-back writes by a read cycle to avoid
++			 * stalling the VUART. Read a register that won't have
++			 * side-effects and discard the result.
++			 */
++			serial_in(up, UART_SCR);
++		}
+ 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+ 		port->icount.tx++;
+ 		if (uart_circ_empty(xmit))
+--- linux_org/drivers/tty/serial/8250/8250.h	2021-09-11 13:45:07.829504741 +0800
++++ linux/drivers/tty/serial/8250/8250.h	2021-09-11 13:45:15.000000000 +0800
+@@ -70,24 +70,25 @@
+ 	unsigned int	flags;
+ };
+ 
+-#define UART_CAP_FIFO	(1 << 8)	/* UART has FIFO */
+-#define UART_CAP_EFR	(1 << 9)	/* UART has EFR */
+-#define UART_CAP_SLEEP	(1 << 10)	/* UART has IER sleep */
+-#define UART_CAP_AFE	(1 << 11)	/* MCR-based hw flow control */
+-#define UART_CAP_UUE	(1 << 12)	/* UART needs IER bit 6 set (Xscale) */
+-#define UART_CAP_RTOIE	(1 << 13)	/* UART needs IER bit 4 set (Xscale, Tegra) */
+-#define UART_CAP_HFIFO	(1 << 14)	/* UART has a "hidden" FIFO */
+-#define UART_CAP_RPM	(1 << 15)	/* Runtime PM is active while idle */
+-#define UART_CAP_IRDA	(1 << 16)	/* UART supports IrDA line discipline */
+-#define UART_CAP_MINI	(1 << 17)	/* Mini UART on BCM283X family lacks:
+-					 * STOP PARITY EPAR SPAR WLEN5 WLEN6
+-					 */
++#define UART_CAP_FIFO	BIT(8)	/* UART has FIFO */
++#define UART_CAP_EFR	BIT(9)	/* UART has EFR */
++#define UART_CAP_SLEEP	BIT(10)	/* UART has IER sleep */
++#define UART_CAP_AFE	BIT(11)	/* MCR-based hw flow control */
++#define UART_CAP_UUE	BIT(12)	/* UART needs IER bit 6 set (Xscale) */
++#define UART_CAP_RTOIE	BIT(13)	/* UART needs IER bit 4 set (Xscale, Tegra) */
++#define UART_CAP_HFIFO	BIT(14)	/* UART has a "hidden" FIFO */
++#define UART_CAP_RPM	BIT(15)	/* Runtime PM is active while idle */
++#define UART_CAP_IRDA	BIT(16)	/* UART supports IrDA line discipline */
++#define UART_CAP_MINI	BIT(17)	/* Mini UART on BCM283X family lacks:
++				 * STOP PARITY EPAR SPAR WLEN5 WLEN6
++				 */
+ 
+-#define UART_BUG_QUOT	(1 << 0)	/* UART has buggy quot LSB */
+-#define UART_BUG_TXEN	(1 << 1)	/* UART has buggy TX IIR status */
+-#define UART_BUG_NOMSR	(1 << 2)	/* UART has buggy MSR status bits (Au1x00) */
+-#define UART_BUG_THRE	(1 << 3)	/* UART has buggy THRE reassertion */
+-#define UART_BUG_PARITY	(1 << 4)	/* UART mishandles parity if FIFO enabled */
++#define UART_BUG_QUOT	BIT(0)	/* UART has buggy quot LSB */
++#define UART_BUG_TXEN	BIT(1)	/* UART has buggy TX IIR status */
++#define UART_BUG_NOMSR	BIT(2)	/* UART has buggy MSR status bits (Au1x00) */
++#define UART_BUG_THRE	BIT(3)	/* UART has buggy THRE reassertion */
++#define UART_BUG_PARITY	BIT(4)	/* UART mishandles parity if FIFO enabled */
++#define UART_BUG_TXRACE	BIT(5)	/* UART Tx fails to set remote DR */
+ 
+ 
+ #ifdef CONFIG_SERIAL_8250_SHARE_IRQ

@@ -1,0 +1,123 @@
+--- linux/drivers/block/nbd.c	2021-08-18 04:55:25.222714194 +0000
++++ linux_new/drivers/block/nbd.c	2021-08-18 04:58:14.871475712 +0000
+@@ -145,8 +145,8 @@
+ 
+ #define NBD_DEF_BLKSIZE 1024
+ 
+-static unsigned int nbds_max = 16;
+-static int max_part = 16;
++static unsigned int nbds_max = 8; /* Maximum 4 CD, 4 HD */
++static int max_part = 0; /* We don't redirect individual partition (eg./dev/nbd0p1) so not needed */
+ static int part_shift;
+ 
+ static int nbd_dev_dbg_init(struct nbd_device *nbd);
+@@ -1354,6 +1354,87 @@
+ 		blk_queue_rq_timeout(nbd->disk->queue, 30 * HZ);
+ }
+ 
++static bool ami_abort_cmd(struct request *req, void *data, bool reserved)
++{
++	struct nbd_cmd *cmd = blk_mq_rq_to_pdu(req);
++	struct nbd_device *nbd = cmd->nbd;
++	struct nbd_config *config;
++
++	if (!mutex_trylock(&cmd->lock))
++		return BLK_EH_RESET_TIMER;
++
++	if (!refcount_inc_not_zero(&nbd->config_refs)) {
++		cmd->status = BLK_STS_TIMEOUT;
++		mutex_unlock(&cmd->lock);
++		goto done2;
++	}
++	config = nbd->config;
++
++	if (config->num_connections > 1) {
++		dev_err_ratelimited(nbd_to_dev(nbd),
++				    "Connection timed out, retrying (%d/%d alive)\n",
++				    atomic_read(&config->live_connections),
++				    config->num_connections);
++		/*
++		 * Hooray we have more connections, requeue this IO, the submit
++		 * path will put it on a real connection.
++		 */
++		if (config->socks && config->num_connections > 1) {
++			if (cmd->index < config->num_connections) {
++				struct nbd_sock *nsock =
++					config->socks[cmd->index];
++				mutex_lock(&nsock->tx_lock);
++				/* We can have multiple outstanding requests, so
++				 * we don't want to mark the nsock dead if we've
++				 * already reconnected with a new socket, so
++				 * only mark it dead if its the same socket we
++				 * were sent out on.
++				 */
++				if (cmd->cookie == nsock->cookie)
++					nbd_mark_nsock_dead(nbd, nsock, 1);
++				mutex_unlock(&nsock->tx_lock);
++			}
++			mutex_unlock(&cmd->lock);
++			nbd_requeue_cmd(cmd);
++			nbd_config_put(nbd);
++			return BLK_EH_DONE;
++		}
++	}
++
++	if (!nbd->tag_set.timeout) {
++		/*
++		 * Userspace sets timeout=0 to disable socket disconnection,
++		 * so just warn and reset the timer.
++		 */
++		cmd->retries++;
++		dev_info(nbd_to_dev(nbd), "Possible stuck request %p: control (%s@%llu,%uB). Runtime %u seconds\n",
++			req, nbdcmd_to_ascii(req_to_nbd_cmd_type(req)),
++			(unsigned long long)blk_rq_pos(req) << 9,
++			blk_rq_bytes(req), (req->timeout / HZ) * cmd->retries);
++
++		mutex_unlock(&cmd->lock);
++		nbd_config_put(nbd);
++		return BLK_EH_RESET_TIMER;
++	}
++
++	set_bit(NBD_RT_TIMEDOUT, &config->runtime_flags);
++	cmd->status = BLK_STS_IOERR;
++	mutex_unlock(&cmd->lock);
++	sock_shutdown(nbd);
++	nbd_config_put(nbd);
++done2:
++	blk_mq_complete_request(req);
++	return true;
++}
++
++static int ami_nbd_disconnect(struct nbd_device *nbd)
++{
++	blk_mq_quiesce_queue(nbd->disk->queue);
++	blk_mq_tagset_busy_iter(&nbd->tag_set, ami_abort_cmd, nbd);
++	blk_mq_unquiesce_queue(nbd->disk->queue);
++	return 0;
++}
++
+ /* Must be called with config_lock held */
+ static int __nbd_ioctl(struct block_device *bdev, struct nbd_device *nbd,
+ 		       unsigned int cmd, unsigned long arg)
+@@ -1393,6 +1474,10 @@
+ 	case NBD_DO_IT:
+ 		return nbd_start_device_ioctl(nbd, bdev);
+ 	case NBD_CLEAR_QUE:
++		/* while data read in progress and if we issue disconnect from client
++		** sometimes queue data is not cleared. So manually reused this IOCTL
++		** for clearing pending requests in queue by forcing timeout */
++		ami_nbd_disconnect(nbd);
+ 		/*
+ 		 * This is for compatibility only.  The queue is always cleared
+ 		 * by NBD_DO_IT or NBD_CLEAR_SOCK.
+--- linux/drivers/usb/gadget/function/storage_common.c	2021-08-18 04:55:26.710719599 +0000
++++ linux_new/drivers/usb/gadget/function/storage_common.c	2021-08-18 04:59:20.687780900 +0000
+@@ -438,7 +438,7 @@
+ 		((char *) buf)[count-1] = 0;		/* Ugh! */
+ 
+ 	/* Load new medium */
+-	down_write(filesem);
++	rc = down_write_trylock(filesem);if (rc == 0) return -EBUSY; /* For NBD to release resources immediately */
+ 	if (count > 0 && buf[0]) {
+ 		/* fsg_lun_open() will close existing file if any. */
+ 		rc = fsg_lun_open(curlun, buf);

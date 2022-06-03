@@ -46,6 +46,7 @@ CFLAGS +=   -I${SPXINC}/userprivilege
 CFLAGS  +=  -I${SPXINC}/featuredefine
 CFLAGS	+= 	-I${SPXINC}/Extendedpriv
 CFLAGS += -I${SPXINC}/racsessioninfo
+CFLAGS  +=	-I${SPXINC}/qdecoder
 
 # make use of USB Gadget + NBD API for Media
 ifeq "$(CONFIG_SPX_FEATURE_LIB_USB_GADGET)" "YES"
@@ -72,6 +73,7 @@ LIBS	+=	-L${SPXLIB}/dbgout -ldbgout
 LIBS	+=	-L${SPXLIB}/ncml -lncml
 LIBS	+=	-L$(SPXLIB)/user_auth -luserauth
 LIBS    +=  -L${SPXLIB}/featuredefine -lfeaturedefine
+LIBS	+=	-L${SPXLIB}/qdecoder -lqdecoder
 #LIBS    +=  -L${SPXLIB}/session -lsession
 
 LIBS	+=	-lpthread

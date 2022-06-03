@@ -1,0 +1,134 @@
+diff -Naur linux_old/include/dt-bindings/i2c/i2c.h linux/include/dt-bindings/i2c/i2c.h
+--- linux_old/include/dt-bindings/i2c/i2c.h	2021-10-21 14:33:39.000000000 +0800
++++ linux/include/dt-bindings/i2c/i2c.h	2021-10-21 14:26:26.000000000 +0800
+@@ -15,82 +15,114 @@
+ #define I2C_OWN_SLAVE_ADDRESS	(1 << 30)
+ #ifdef CONFIG_SPX_FEATURE_I2C0_DMA_MODE
+ 	#define I2C_BUS0_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C0_BYTE_MODE
+ 	#define I2C_BUS0_MODE 0
++#else
++	#define I2C_BUS0_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C1_DMA_MODE
+ 	#define I2C_BUS1_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C1_BYTE_MODE
+ 	#define I2C_BUS1_MODE 0
++#else
++	#define I2C_BUS1_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C2_DMA_MODE
+ 	#define I2C_BUS2_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C2_BYTE_MODE
+ 	#define I2C_BUS2_MODE 0
++#else
++	#define I2C_BUS2_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C3_DMA_MODE
+ 	#define I2C_BUS3_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C3_BYTE_MODE
+ 	#define I2C_BUS3_MODE 0
++#else
++	#define I2C_BUS3_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C4_DMA_MODE
+ 	#define I2C_BUS4_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C4_BYTE_MODE
+ 	#define I2C_BUS4_MODE 0
++#else
++	#define I2C_BUS4_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C5_DMA_MODE
+ 	#define I2C_BUS5_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C5_BYTE_MODE
+ 	#define I2C_BUS5_MODE 0
++#else
++	#define I2C_BUS5_MODE 2
+ #endif    
+ #ifdef CONFIG_SPX_FEATURE_I2C6_DMA_MODE
+ 	#define I2C_BUS6_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C6_BYTE_MODE
+ 	#define I2C_BUS6_MODE 0
++#else
++	#define I2C_BUS6_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C7_DMA_MODE
+ 	#define I2C_BUS7_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C7_BYTE_MODE
+ 	#define I2C_BUS7_MODE 0
++#else
++	#define I2C_BUS7_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C8_DMA_MODE
+ 	#define I2C_BUS8_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C8_BYTE_MODE
+ 	#define I2C_BUS8_MODE 0
++#else
++	#define I2C_BUS8_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C9_DMA_MODE
+ 	#define I2C_BUS9_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C9_BYTE_MODE
+ 	#define I2C_BUS9_MODE 0
++#else
++	#define I2C_BUS9_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C10_DMA_MODE
+ 	#define I2C_BUS10_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C10_BYTE_MODE
+ 	#define I2C_BUS10_MODE 0
++#else
++	#define I2C_BUS10_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C11_DMA_MODE
+ 	#define I2C_BUS11_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C11_BYTE_MODE
+ 	#define I2C_BUS11_MODE 0
++#else
++	#define I2C_BUS11_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C12_DMA_MODE
+ 	#define I2C_BUS12_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C12_BYTE_MODE
+ 	#define I2C_BUS12_MODE 0
++#else
++	#define I2C_BUS12_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C13_DMA_MODE
+ 	#define I2C_BUS13_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C13_BYTE_MODE
+ 	#define I2C_BUS13_MODE 0
++#else
++	#define I2C_BUS13_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C14_DMA_MODE
+ 	#define I2C_BUS14_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C14_BYTE_MODE
+ 	#define I2C_BUS14_MODE 0
++#else
++	#define I2C_BUS14_MODE 2
+ #endif
+ #ifdef CONFIG_SPX_FEATURE_I2C15_DMA_MODE
+ 	#define I2C_BUS15_MODE 2
+-#else
++#elif defined CONFIG_SPX_FEATURE_I2C15_BYTE_MODE
+ 	#define I2C_BUS15_MODE 0
++#else
++	#define I2C_BUS15_MODE 2
+ #endif
+ #endif

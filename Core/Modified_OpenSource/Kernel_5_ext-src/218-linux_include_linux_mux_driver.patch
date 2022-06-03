@@ -1,0 +1,10 @@
+--- linux_org/include/linux/mux/driver.h	2022-03-29 21:52:30.432322717 +0530
++++ linux_patches/include/linux/mux/driver.h	2022-03-29 22:55:33.371963747 +0530
+@@ -47,6 +47,7 @@
+ 
+ 	unsigned int states;
+ 	int idle_state;
++	int deselect_timeout;
+ };
+ 
+ /**

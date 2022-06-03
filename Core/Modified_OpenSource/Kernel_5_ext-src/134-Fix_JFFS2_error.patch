@@ -1,0 +1,93 @@
+--- linux_old/drivers/spi/spi-aspeed.c	2022-03-14 16:49:31.553072759 +0800
++++ linux/drivers/spi/spi-aspeed.c	2022-03-15 14:26:54.203826402 +0800
+@@ -24,6 +24,7 @@
+ #include <linux/sizes.h>
+ #include <linux/spi/spi.h>
+ #include <linux/spi/spi-mem.h>
++#include <linux/mfd/syscon.h>
+ 
+ /* ASPEED FMC/SPI memory control register related */
+ #define OFFSET_CE_TYPE_SETTING		0x00
+@@ -62,6 +63,9 @@
+ #define DMA_DISCARD_REQ_MAGIC	0xdeea0000
+ #define FMC_SPI_DMA_BUF_LEN	0x3400
+ 
++#define ASPEED_REVISION_ID0 0x04
++#define ID0_AST2600A3           0x05030303
++
+ enum aspeed_spi_ctl_reg_value {
+ 	ASPEED_SPI_BASE,
+ 	ASPEED_SPI_READ,
+@@ -1315,6 +1319,9 @@
+ 	const struct of_device_id *match;
+ 	struct clk *clk;
+ 	struct resource *res;
++	struct regmap *scu; //for soc chip detect
++	u32 revid0;
++	int isA3 = 0;
+ 
+ 	spi_ctrl = spi_alloc_master(dev, sizeof(struct aspeed_spi_controller));
+ 	if (!spi_ctrl)
+@@ -1358,30 +1365,52 @@
+ 		goto end;
+ 	}
+ 
++	/* Detect SOC chip version
++	 * if SOC is A3 turn on A3 user mode
++	 * and only enable A1 dts setting if chip is not A3
++	 */
++	scu = syscon_regmap_lookup_by_phandle(dev->of_node, "aspeed,scu");
++    if (IS_ERR(scu)) {
++        dev_err(dev, "failed to find 2600 SCU regmap\n");
++        return PTR_ERR(scu);
++    }
++
++	regmap_read(scu, ASPEED_REVISION_ID0, &revid0);
++
++	if(revid0 == ID0_AST2600A3)
++		isA3 = 1;
++	
+ 	ast_ctrl->flag = 0;
+-	if (of_property_read_bool(dev->of_node, "fmc-spi-user-mode")) {
++	if(isA3) {
++	//if (of_property_read_bool(dev->of_node, "fmc-spi-user-mode")) {
+ 		dev_info(dev, "adopt user mode\n");
+ 		ast_ctrl->flag |= SPI_MODE_USER;
+ 	}
+ 
+ 	/* Should be set on AST2600-A1/A2 for errata 65 */
+ 	if (of_property_read_bool(dev->of_node, "low-spi-clk-write")) {
+-		dev_info(dev, "adopt low spi clk for write\n");
+-		ast_ctrl->flag |= SPI_FIXED_LOW_W_CLK;
++		if(!isA3) {
++			dev_info(dev, "adopt low spi clk for write\n");
++			ast_ctrl->flag |= SPI_FIXED_LOW_W_CLK;
++		}
+ 	}
+ 
+ 	/*
+-	 * "spi-dma-write" should be set on AST2600-A1/A2 for errata 65.
+-	 * Should NOT be set on AST2600-A3 with high SPI clock
+-	 */
++	* "spi-dma-write" should be set on AST2600-A1/A2 for errata 65.
++	* Should NOT be set on AST2600-A3 with high SPI clock
++	*/
+ 	if (of_property_read_bool(dev->of_node, "spi-dma-write")) {
+-		dev_info(dev, "adopt dma write mode\n");
+-		ast_ctrl->flag |= SPI_DMA_WRITE;
++		if(!isA3) {
++			dev_info(dev, "adopt dma write mode\n");
++			ast_ctrl->flag |= SPI_DMA_WRITE;
++		}
+ 	}
+ 
+ 	if (of_property_read_bool(dev->of_node, "spi-dma-read")) {
+-		dev_info(dev, "adopt dma read mode\n");
+-		ast_ctrl->flag |= SPI_DMA_READ;
++		if(!isA3) {
++			dev_info(dev, "adopt dma read mode\n");
++			ast_ctrl->flag |= SPI_DMA_READ;
++		}
+ 	}
+ 
+ 	if ((ast_ctrl->flag & SPI_MODE_USER) && (ast_ctrl->flag & SPI_DMA_WRITE)) {

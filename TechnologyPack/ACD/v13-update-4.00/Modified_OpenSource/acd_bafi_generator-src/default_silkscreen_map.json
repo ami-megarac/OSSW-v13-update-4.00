@@ -1,0 +1,228 @@
+{
+  "MemoryLocationPcb": [
+    {
+      "Socket": 0,
+      "IMC": 0,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "A8J1"
+    },
+    {
+      "Socket": 0,
+      "IMC": 0,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "A8J1"
+    },
+    {
+      "Socket": 0,
+      "IMC": 0,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "B8J2"
+    },
+    {
+      "Socket": 0,
+      "IMC": 0,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "B8J2"
+    },
+    {
+      "Socket": 0,
+      "IMC": 1,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "J8J3"
+    },
+    {
+      "Socket": 0,
+      "IMC": 1,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "J8J3"
+    },
+    {
+      "Socket": 0,
+      "IMC": 1,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "E8J4"
+    },
+    {
+      "Socket": 0,
+      "IMC": 1,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "E8J4"
+    },
+    {
+      "Socket": 0,
+      "IMC": 2,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "J8J5"
+    },
+    {
+      "Socket": 0,
+      "IMC": 2,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "J8J5"
+    },
+    {
+      "Socket": 0,
+      "IMC": 2,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "J8J6"
+    },
+    {
+      "Socket": 0,
+      "IMC": 2,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "J8J6"
+    },
+    {
+      "Socket": 0,
+      "IMC": 3,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "J8J7"
+    },
+    {
+      "Socket": 0,
+      "IMC": 3,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "J8J7"
+    },
+    {
+      "Socket": 0,
+      "IMC": 3,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "J8J82"
+    },
+    {
+      "Socket": 0,
+      "IMC": 3,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "J8J82"
+    },
+    {
+      "Socket": 1,
+      "IMC": 0,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "C8J9"
+    },
+    {
+      "Socket": 1,
+      "IMC": 0,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "C8J9"
+    },
+    {
+      "Socket": 1,
+      "IMC": 0,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "J8J10"
+    },
+    {
+      "Socket": 1,
+      "IMC": 0,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "J8J33"
+    },
+    {
+      "Socket": 1,
+      "IMC": 1,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "J8J45"
+    },
+    {
+      "Socket": 1,
+      "IMC": 1,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "J8J11"
+    },
+    {
+      "Socket": 1,
+      "IMC": 1,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "F8J12"
+    },
+    {
+      "Socket": 1,
+      "IMC": 1,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "F8J12"
+    },
+    {
+      "Socket": 1,
+      "IMC": 2,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "J8J13"
+    },
+    {
+      "Socket": 1,
+      "IMC": 2,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "J8J13"
+    },
+    {
+      "Socket": 1,
+      "IMC": 2,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "J8J14"
+    },
+    {
+      "Socket": 1,
+      "IMC": 2,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "J8J14"
+    },
+    {
+      "Socket": 1,
+      "IMC": 3,
+      "Channel": 0,
+      "Slot": 0,
+      "SlotName": "J8J15"
+    },
+    {
+      "Socket": 1,
+      "IMC": 3,
+      "Channel": 0,
+      "Slot": 1,
+      "SlotName": "J8J15"
+    },
+    {
+      "Socket": 1,
+      "IMC": 3,
+      "Channel": 1,
+      "Slot": 0,
+      "SlotName": "K8J16"
+    },
+    {
+      "Socket": 1,
+      "IMC": 3,
+      "Channel": 1,
+      "Slot": 1,
+      "SlotName": "K8J16"
+    }
+  ]
+}

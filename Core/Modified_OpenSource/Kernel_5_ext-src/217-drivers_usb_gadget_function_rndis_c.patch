@@ -1,0 +1,76 @@
+--- linux/drivers/usb/gadget/function/rndis.c	2022-04-01 11:56:40.379270546 +0800
++++ linux_new/drivers/usb/gadget/function/rndis.c	2022-03-31 18:18:43.521820000 +0800
+@@ -94,6 +94,7 @@
+ 	RNDIS_OID_GEN_MAXIMUM_TOTAL_SIZE,
+ 	RNDIS_OID_GEN_MEDIA_CONNECT_STATUS,
+ 	RNDIS_OID_GEN_PHYSICAL_MEDIUM,
++	RNDIS_OID_GEN_SUPPORTED_GUIDS, // For HLK test with Server 2022: oidswmi.
+ 
+ 	/* the statistical stuff */
+ 	RNDIS_OID_GEN_XMIT_OK,
+@@ -164,6 +165,40 @@
+ #endif	/* RNDIS_PM */
+ };
+ 
++// For HLK test with Server 2022: oidswmi.
++typedef struct _GUID {
++  u32  Data1;
++  u16 Data2;
++  u16 Data3;
++  u8  Data4[8];
++} __attribute__((packed)) GUID;
++
++typedef u32 NDIS_OID, *PNDIS_OID;
++
++typedef int NDIS_STATUS, *PNDIS_STATUS;
++
++typedef struct _NDIS_GUID {
++    GUID             Guid;
++    union {
++        NDIS_OID     Oid;
++        NDIS_STATUS  Status;
++    };
++    u32            Size;
++    u32            Flags;
++} __attribute__((packed)) NDIS_GUID, *PNDIS_GUID;
++
++// Ref: https://github.com/tpn/winsdk-10/blob/master/Include/10.0.16299.0/shared/ntddndis.h
++#define fNDIS_GUID_TO_OID                   0x00000001
++#define fNDIS_GUID_TO_STATUS                0x00000002
++#define fNDIS_GUID_ANSI_STRING              0x00000004
++#define fNDIS_GUID_UNICODE_STRING           0x00000008
++#define fNDIS_GUID_ARRAY                    0x00000010
++#define fNDIS_GUID_ALLOW_READ               0x00000020
++#define fNDIS_GUID_ALLOW_WRITE              0x00000040
++#define fNDIS_GUID_METHOD                   0x00000080
++#define fNDIS_GUID_NDIS_RESERVED            0x00000100
++#define fNDIS_GUID_SUPPORT_COMMON_HEADER 0x00000200
++
+ 
+ /* NDIS Functions */
+ static int gen_ndis_query_resp(struct rndis_params *params, u32 OID, u8 *buf,
+@@ -468,6 +503,24 @@
+ 		*outbuf = cpu_to_le32(0);
+ 		retval = 0;
+ 		break;
++	/* Optional, but needed for HLK test with Server 2022: oidswmi.*/
++	case RNDIS_OID_GEN_SUPPORTED_GUIDS:
++	{
++		pr_debug("%s: RNDIS_OID_GEN_SUPPORTED_GUIDS\n", __func__);
++		length = sizeof(NDIS_GUID);
++		// Ref: https://github.com/wmliang/wdk-10/blob/master/Include/10.0.14393.0/km/wmicore.mof
++		NDIS_GUID dummyGUID = {.Guid = {.Data1 = 0x44795700, .Data2 = 0xa61b, .Data3 = 0x11d0, 
++			.Data4 = {	[0] = 0x8d, [1] = 0xd4,
++						[2] = 0x00, [3] = 0xc0,
++						[4] = 0x4f, [5] = 0xc3,
++						[6] = 0x35, [7] = 0x8c}},
++			.Oid = RNDIS_OID_802_3_CURRENT_ADDRESS,
++			.Size = 6,
++			.Flags = (fNDIS_GUID_TO_OID | fNDIS_GUID_ARRAY)};
++		memcpy(outbuf, &dummyGUID, length);
++		
++		retval = 0;}
++		break;
+ 
+ 	default:
+ 		pr_warn("%s: query unknown OID 0x%08X\n", __func__, OID);

@@ -151,7 +151,6 @@ int getFreeInst(void)
         if(instlist[i] == 0)
             return i;
     }
-    if(i > MAX_IOCTL_INSTANCE) return -1;
     return -1;
 }
 
@@ -476,7 +475,7 @@ long gpio_ioctlUnlocked_ext(struct gpio_dev *pdev, unsigned int cmd, unsigned lo
     gpio_interrupt_sensor gpio_intr;
     unsigned char ret_gpio_int_triggered[64];
     unsigned long flags;
-    int instance, retval=-1;
+    int instance;
 
     switch (cmd)
     {
@@ -486,20 +485,22 @@ long gpio_ioctlUnlocked_ext(struct gpio_dev *pdev, unsigned int cmd, unsigned lo
             if ( copy_from_user(&gpio_intr, (void*)arg, sizeof(gpio_interrupt_sensor)) )
                             return -EFAULT;
             //Check for GPIO is already register by other application
-            if((ret = isRegisteredAllowed(&gpio_intr)) == -1)
+            /*Reason for False Positive - Call by reference,not used as array */
+            /*coverity [Untrusted array index read : FALSE]*/
+            if((ret = isRegisteredAllowed(&gpio_intr)) == -1) 
             {
                 printk("GPIO PIN %d Already Registered with different triggered method and type\n",gpio_intr.gpio_number);
                 printk("Registered not allowed for GPIO PIN %d\n",gpio_intr.gpio_number);
                 return -1;
             } 
-            
-            if((ret == 0) && (g_gpiopinlist[gpio_intr.gpio_number] == 0))
-            {
-                if (pdev->pgpio_hal->pgpio_hal_ops->regsensorints) {
-                    if (0 != pdev->pgpio_hal->pgpio_hal_ops->regsensorints((void*)&gpin_data, 1, (void *)&gpio_intr))
-                        return -1;
-                    }
-            }
+            if(( gpio_intr.gpio_number >=0 ) && ( gpio_intr.gpio_number < 256) )
+                if((ret == 0) && (g_gpiopinlist[gpio_intr.gpio_number] == 0))
+                {
+                    if (pdev->pgpio_hal->pgpio_hal_ops->regsensorints) {
+                        if (0 != pdev->pgpio_hal->pgpio_hal_ops->regsensorints((void*)&gpin_data, 1, (void *)&gpio_intr))
+                            return -1;
+                        }
+                }
             //check if it is New Application trying to register
             if(ReturnAppInst(current->tgid,current->comm) == -1)
             {
@@ -519,13 +520,13 @@ long gpio_ioctlUnlocked_ext(struct gpio_dev *pdev, unsigned int cmd, unsigned lo
                 newnode->pid = current->tgid; //process ID
                 memset(&newnode->AppName,0,16);
                 memset(&newnode->gpio_intr,0,sizeof(gpio_interrupt)*256);
-		ret = snprintf(newnode->AppName,strlen(current->comm),"%s",current->comm);
-		if(retval < 0 || retval >= sizeof(newnode->AppName))
-		{
-			printk("Buffer overflow\n");
-			kfree(newnode);
-			return -1;
-		}	
+                ret = snprintf(newnode->AppName,strlen(current->comm),"%s",current->comm);
+                if(ret < 0 || ret >= sizeof(newnode->AppName))
+                {
+                    printk("Buffer overflow\n");
+                    kfree(newnode);
+                    return -1;
+                }	
                 //strncpy(newnode->AppName,current->comm,strlen(current->comm));
                 newnode->gpio_intr[gpio_intr.gpio_number].gpio_intr_enabled = 1;
                 newnode->gpio_intr[gpio_intr.gpio_number].trigger_method = gpio_intr.trigger_method;
@@ -617,27 +618,28 @@ long gpio_ioctlUnlocked_ext(struct gpio_dev *pdev, unsigned int cmd, unsigned lo
                 list_for_each(pos,&head_gpio_list)
                 {
                     tmpnode = list_entry(pos,gpiolist,list);
-                    if(tmpnode->pid == current->tgid && tmpnode->gpio_intr[gpin_data.PinNum].gpio_intr_enabled == 1) 
-                    {
-                        if(g_gpiopinlist[gpin_data.PinNum] == 1)
+                    if(( gpin_data.PinNum >=0 ) && ( gpin_data.PinNum < 256) )
+                        if(tmpnode->pid == current->tgid && tmpnode->gpio_intr[gpin_data.PinNum].gpio_intr_enabled == 1)  
                         {
-                            if (pdev->pgpio_hal->pgpio_hal_ops->unregsensorints)
+                            if(g_gpiopinlist[gpin_data.PinNum] == 1)
                             {
-                                if (0 != pdev->pgpio_hal->pgpio_hal_ops->unregsensorints((void*)&gpin_data ))
+                                if (pdev->pgpio_hal->pgpio_hal_ops->unregsensorints)
                                 {
-                                    spin_unlock_irqrestore(&gpio_lock,flags);
-                                    return -1;
+                                    if (0 != pdev->pgpio_hal->pgpio_hal_ops->unregsensorints((void*)&gpin_data ))
+                                    {
+                                        spin_unlock_irqrestore(&gpio_lock,flags);
+                                        return -1;
+                                    }
                                 }
                             }
+                            g_gpiopinlist[gpin_data.PinNum] -= 1;
+                            total_interrupt_gpio -= 1;
+                            tmpnode->gpio_intr[gpin_data.PinNum].gpio_intr_enabled = 0;
+                            tmpnode->gpio_intr[gpin_data.PinNum].trigger_method = 0;
+                            tmpnode->gpio_intr[gpin_data.PinNum].trigger_type = 0;
+                            remove_gpio_interrupt(gpin_data.PinNum);//remove pending gpio interrupts 
+                            break;
                         }
-                        g_gpiopinlist[gpin_data.PinNum] -= 1;
-                        total_interrupt_gpio -= 1;
-                        tmpnode->gpio_intr[gpin_data.PinNum].gpio_intr_enabled = 0;
-                        tmpnode->gpio_intr[gpin_data.PinNum].trigger_method = 0;
-                        tmpnode->gpio_intr[gpin_data.PinNum].trigger_type = 0;
-                        remove_gpio_interrupt(gpin_data.PinNum);//remove pending gpio interrupts 
-                        break;
-                    }
                 }
                 tmpnode = NULL;
                 list_for_each(pos,&head_gpio_list)

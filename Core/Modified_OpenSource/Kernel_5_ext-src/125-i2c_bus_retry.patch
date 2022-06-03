@@ -1,0 +1,41 @@
+diff -ruNa linux/drivers/i2c/busses/i2c-new-aspeed.c linux_n/drivers/i2c/busses/i2c-new-aspeed.c
+--- linux/drivers/i2c/busses/i2c-new-aspeed.c	2022-02-07 10:17:21.739939000 +0800
++++ linux_n/drivers/i2c/busses/i2c-new-aspeed.c	2022-01-28 15:04:03.479625000 +0800
+@@ -1481,7 +1481,7 @@
+ 	struct aspeed_new_i2c_bus *i2c_bus;
+ 	const struct of_device_id *match;
+ 	struct resource *res;
+-	u32 global_ctrl;
++	u32 global_ctrl, retry = 0;
+ 	int ret = 0, bus = 0;
+ 
+ 	i2c_bus = devm_kzalloc(&pdev->dev, sizeof(*i2c_bus), GFP_KERNEL);
+@@ -1596,11 +1596,14 @@
+ 		dev_err(&pdev->dev, "Could not read bus-frequency property\n");
+ 		i2c_bus->bus_frequency = 100000;
+ 	}
+-
++	ret = of_property_read_u32(pdev->dev.of_node, "bus-retry", &retry);
++	if (ret < 0) {
++		retry = 0;
++	}
+ 	/* Initialize the I2C adapter */
+ 	i2c_bus->adap.owner = THIS_MODULE;
+ 	i2c_bus->adap.algo = &i2c_aspeed_algorithm;
+-	i2c_bus->adap.retries = 0;
++	i2c_bus->adap.retries = retry;
+ 	i2c_bus->adap.dev.parent = i2c_bus->dev;
+ 	i2c_bus->adap.dev.of_node = pdev->dev.of_node;
+ 	i2c_bus->adap.algo_data = i2c_bus;
+diff -ruNa linux/drivers/i2c/i2c-core-base.c linux_n/drivers/i2c/i2c-core-base.c
+--- linux/drivers/i2c/i2c-core-base.c	2022-02-07 17:21:53.083399617 +0800
++++ linux_n/drivers/i2c/i2c-core-base.c	2022-02-07 17:16:19.111406700 +0800
+@@ -2005,8 +2005,6 @@
+ 		else
+ 			ret = adap->algo->master_xfer(adap, msgs, num);
+ 
+-		if (ret != -EAGAIN)
+-			break;
+ 		if (time_after(jiffies, orig_jiffies + adap->timeout))
+ 			break;
+ 	}

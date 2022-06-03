@@ -17,6 +17,7 @@
 #include <linux/wait.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/dma-mapping.h>
 
 #include "ast_videocap_hw.h"
 

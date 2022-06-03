@@ -24,7 +24,6 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/aio.h>
-#include <linux/bigphysarea.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
 
@@ -60,6 +59,7 @@ static struct cdev ast_videocap_cdev;
 void *ast_videocap_reg_virt_base;
 void *ast_videocap_video_buf_virt_addr;
 void *ast_videocap_video_buf_phys_addr;
+dma_addr_t dma;
 
 #ifdef SOC_AST2600
 #define DP_BASE							0x1e6eb000
@@ -83,12 +83,12 @@ static int ast_videocap_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int ast_videocap_alloc_bigphysarea(void)
+static int ast_videocap_alloc_mem_pool(void)
 {
 	unsigned long addr;
 	unsigned long size;
 
-	ast_videocap_video_buf_virt_addr = bigphysarea_alloc_pages(MEM_POOL_SIZE / PAGE_SIZE, 0, GFP_KERNEL);
+	ast_videocap_video_buf_virt_addr = dma_alloc_coherent(NULL, MEM_POOL_SIZE, &dma, GFP_KERNEL);
 	if (ast_videocap_video_buf_virt_addr == NULL) {
 		return -1;
 	}
@@ -108,7 +108,7 @@ static int ast_videocap_alloc_bigphysarea(void)
 	return 0;
 }
 
-static void ast_videocap_free_bigphysarea(void)
+static void ast_videocap_free_mem_pool(void)
 {
 	unsigned long addr;
 	unsigned long size;
@@ -123,7 +123,7 @@ static void ast_videocap_free_bigphysarea(void)
 			addr += PAGE_SIZE;
 			size -= PAGE_SIZE;
 		}
-		bigphysarea_free_pages(ast_videocap_video_buf_virt_addr);
+		dma_free_coherent(NULL, MEM_POOL_SIZE, ast_videocap_video_buf_virt_addr, dma);
 	}
 }
 
@@ -144,7 +144,7 @@ int __init ast_videocap_module_init(void)
 {
 	int ret;
 
-	printk("AST Video Capture Driver, (c) 2009-2020 American Megatrends Inc.\n");
+	printk("AST Video Capture Driver, (c) 2009-2022 American Megatrends Inc.\n");
 
 	ret = register_chrdev_region(ast_videocap_devno, AST_VIDEOCAP_DEV_NUM, AST_VIDEOCAP_DEV_NAME);
 	if (ret < 0) {
@@ -222,7 +222,7 @@ int __init ast_videocap_module_init(void)
 		goto out_iomap;
 	}
 
-	ret = ast_videocap_alloc_bigphysarea();
+	ret = ast_videocap_alloc_mem_pool();
 	if (ret != 0) {
 		printk(KERN_WARNING "failed to allocate physical memory pool\n");
 		goto out_irq;
@@ -262,7 +262,7 @@ int __init ast_videocap_module_init(void)
 	return 0;
 
 out_bigphys:
-	ast_videocap_free_bigphysarea();
+	ast_videocap_free_mem_pool();
 #ifdef SOC_AST2600
 	if (ast_sdram_reg_virt_base != NULL)
 	iounmap(ast_sdram_reg_virt_base);
@@ -297,7 +297,7 @@ void __exit ast_videocap_module_exit(void)
 	cdev_del(&ast_videocap_cdev);
 	unregister_chrdev_region(ast_videocap_devno, AST_VIDEOCAP_DEV_NUM);
 
-	ast_videocap_free_bigphysarea();
+	ast_videocap_free_mem_pool();
 	ast_videocap_unmap_vga_mem();
 }
 

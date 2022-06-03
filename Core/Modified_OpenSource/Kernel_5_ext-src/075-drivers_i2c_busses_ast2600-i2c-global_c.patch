@@ -1,0 +1,11 @@
+--- linux_old/drivers/i2c/busses/ast2600-i2c-global.c	2021-07-04 23:46:07.513554832 +0800
++++ linux/drivers/i2c/busses/ast2600-i2c-global.c	2021-07-04 23:45:42.253554504 +0800
+@@ -161,7 +161,7 @@
+ 	}
+ 	
+ 	/* ast2600 init */
+-	writel(ASPEED_I2CG_SLAVE_PKT_NAK | ASPEED_I2CG_CTRL_NEW_REG, i2c_ic->base + ASPEED_I2CG_CTRL);
++	writel(ASPEED_I2CG_SLAVE_PKT_NAK | ASPEED_I2CG_CTRL_NEW_REG | ASPEED_I2CG_CTRL_NEW_CLK_DIV, i2c_ic->base + ASPEED_I2CG_CTRL);
+ 	parent_clk = devm_clk_get(&pdev->dev, NULL);
+ 	if (IS_ERR(parent_clk))
+ 		return PTR_ERR(parent_clk);

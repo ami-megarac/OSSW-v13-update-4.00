@@ -1,0 +1,95 @@
+--- linux-5.4.85/drivers/gpio/gpio-aspeed.c	2021-04-15 16:07:53.670747961 +0800
++++ linux-5.4.85-new/drivers/gpio/gpio-aspeed.c	2021-06-15 17:47:45.128236705 +0800
+@@ -979,6 +979,52 @@ static int aspeed_gpio_set_config(struct
+ }
+ 
+ /**
++ * ami_gpiochip_scan_gpios - Scan an ASPEED GPIO controller for GPIO definitions
++ * @chip: GPIO chip to act on
++ *
++ * This is used to find/configure AMI-specific properties in subnodes of an
++ * ASPEED GPIO controller.
++ *
++ * Return: 0 on success, a negative value otherwise.
++ */
++static int ami_gpiochip_scan_gpios(struct gpio_chip *chip)
++{
++	struct device_node *np;
++	u32 debounce_us;
++	u32 gpio;
++	int ret;
++
++	if (!chip->of_node)
++		return 0;
++
++	for_each_available_child_of_node(chip->of_node, np) {
++		if (of_property_read_u32(np, "ami,debounce-interval",
++					 &debounce_us))
++			continue;
++
++		if (of_property_read_u32(np, "gpios", &gpio))
++			continue;
++
++		if (gpio >= chip->ngpio) {
++			pr_err("Invalid GPIO line %u for %s\n",
++			       gpio, chip->label);
++			continue;
++		}
++
++		ret = set_debounce(chip, gpio, debounce_us);
++		if (ret < 0) {
++			of_node_put(np);
++			return ret;
++		}
++
++		pr_info("Debounce %s line %u for period %uus\n",
++			chip->label, gpio, debounce_us);
++	}
++
++	return 0;
++}
++
++/**
+  * aspeed_gpio_copro_set_ops - Sets the callbacks used for handhsaking with
+  *                             the coprocessor for shared GPIO banks
+  * @ops: The callbacks
+@@ -1141,7 +1187,7 @@ static int __init aspeed_gpio_probe(stru
+ 	const struct of_device_id *gpio_id;
+ 	struct aspeed_gpio *gpio;
+ 	int rc, i, banks, err;
+-	u32 ngpio;
++	u32 ngpio,base;
+ 
+ 	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
+ 	if (!gpio)
+@@ -1167,6 +1213,12 @@ static int __init aspeed_gpio_probe(stru
+ 	gpio->config = gpio_id->data;
+ 
+ 	gpio->chip.parent = &pdev->dev;
++	err = of_property_read_u32(pdev->dev.of_node, "base", &base);
++	if(err)
++	{
++	    dev_warn(&pdev->dev,"Failed to get property of base\n");
++	    return err;
++	}    
+ 	err = of_property_read_u32(pdev->dev.of_node, "ngpios", &ngpio);
+ 	gpio->chip.ngpio = (u16) ngpio;
+ 	if (err)
+@@ -1180,7 +1232,7 @@ static int __init aspeed_gpio_probe(stru
+ 	gpio->chip.set = aspeed_gpio_set;
+ 	gpio->chip.set_config = aspeed_gpio_set_config;
+ 	gpio->chip.label = dev_name(&pdev->dev);
+-	gpio->chip.base = -1;
++	gpio->chip.base = (u16) base;
+ 
+ 	/* Allocate a cache of the output registers */
+ 	banks = DIV_ROUND_UP(gpio->chip.ngpio, 32);
+@@ -1238,6 +1290,8 @@ static int __init aspeed_gpio_probe(stru
+ 	if (rc < 0)
+ 		return rc;
+ 
++	ami_gpiochip_scan_gpios(&gpio->chip);
++
+ 	return 0;
+ }
+ 

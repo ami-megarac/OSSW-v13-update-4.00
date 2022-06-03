@@ -82,6 +82,8 @@ static handler_t handle_backend(server *, void *, int);
 static handler_t mod_websocket_handle_subrequest(server *, connection *, void *);
 int get_service_config(buffer *service, SERVICE_CONF_STRUCT *ServiceConfig);
 int get_port(SERVICE_CONF_STRUCT ServiceConfig, buffer *port);
+int WaitOnClientSocket(int server_stopped, int socket, fd_set *rfd);
+
 int cd_instance = 0; // usb device instance
 int media_instance = 0; // thread instance number
 #define OPCODE 2
@@ -140,6 +142,7 @@ webs_ctx WebSockCtx[MAX_INSTANCES];
 #define IUSB_HEADER_SIZE 61
 
 #define SELECT_REMOTE_RESPONSE_TIMEOUT_SECS		20
+#define MAX_SSL_READ_RETRY 10
 
 #define ntohl64(p) \
     ((((uint64_t)((p)[7])) <<  0) + (((uint64_t)((p)[6])) <<  8) +\
@@ -1175,8 +1178,9 @@ void *ReadFromWebClient(void *instance) {
 	unsigned int sout_start, sout_end;
 	uint64_t sin_start, sin_end;
 	int len, bytes, cout_start, cout_end, maxfd;
-	int current_fin = -1;
+	int current_fin = -1, retry = 0;
 	pthread_t self;
+	prctl(PR_SET_NAME,__FUNCTION__,0,0,0);
 
 	len = sout_start = sout_end = cout_start = cout_end = 0 ;
 	sin_start = sin_end = 0;
@@ -1237,6 +1241,11 @@ void *ReadFromWebClient(void *instance) {
 				if (ws_ctx->ssl != NULL) {
 					if ((SSL_get_error(ws_ctx->ssl, bytes) == SSL_ERROR_WANT_READ) || 
 							(SSL_get_error(ws_ctx->ssl, bytes) == SSL_ERROR_SYSCALL)) {
+							// To reduce CPU usage of the thread in case of continuous SSL_ERROR_WANT_READ / SSL_ERROR_SYSCALL.
+							if ((++retry > MAX_SSL_READ_RETRY) && (WaitOnClientSocket(ws_ctx->ser_stopped ,client, &rdlist) != 0)){
+								retry = 0;
+								break;
+							}
 						goto read_again;
 					}
 					TCRIT("\n SSL client closed connection  sslerr:%d \n", SSL_get_error(ws_ctx->ssl, bytes));
@@ -2708,4 +2717,33 @@ int mod_websocket_plugin_init(plugin *p) {
     return 0;
 }
 
+/* In case of continuous SSL_ERROR_WANT_READ / SSL_ERROR_SYSCALL wait untill
+** client socket becomes ready, before going for next read. This will reduce
+** ReadFromClient thread CPU utilization significantly.
+**
+** server_stopped - server status
+** socket  		  - Client socket descriptor
+** rfd     		  - Pointer to the file descriptor to check client socket readiness.
+**
+** Returns  -1 Video server is stopped.
+**           0 if client socket is ready for read. */
+int WaitOnClientSocket(int server_stopped, int socket, fd_set *rfd)
+{
+	struct timeval tv;
+	while(1)
+	{
+		if(server_stopped == 1)
+			return -1;
+
+		FD_ZERO(rfd);
+		FD_SET(socket, rfd);
+
+		tv.tv_sec  = 2;
+		tv.tv_usec = 0;
+		sigwrap_select(socket+1, rfd, 0, 0, &tv);
+
+		if (FD_ISSET(socket, rfd)) break;
+	}
+	return 0;
+}
 /* EOF */

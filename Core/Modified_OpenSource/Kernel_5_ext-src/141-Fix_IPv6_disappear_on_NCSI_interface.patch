@@ -1,0 +1,205 @@
+diff -Naur linux_ori/drivers/net/ethernet/faraday/ftgmac100.c linux/drivers/net/ethernet/faraday/ftgmac100.c
+--- linux_ori/drivers/net/ethernet/faraday/ftgmac100.c	2022-04-25 12:04:29.097186044 +0800
++++ linux/drivers/net/ethernet/faraday/ftgmac100.c	2022-04-25 12:04:29.097186044 +0800
+@@ -54,67 +54,6 @@
+ #define FTGMAC_100MHZ		100000000
+ #define FTGMAC_25MHZ		25000000
+ 
+-struct ftgmac100 {
+-	/* Registers */
+-	struct resource *res;
+-	void __iomem *base;
+-
+-	/* Rx ring */
+-	unsigned int rx_q_entries;
+-	struct ftgmac100_rxdes *rxdes;
+-	dma_addr_t rxdes_dma;
+-	struct sk_buff **rx_skbs;
+-	unsigned int rx_pointer;
+-	u32 rxdes0_edorr_mask;
+-
+-	/* Tx ring */
+-	unsigned int tx_q_entries;
+-	struct ftgmac100_txdes *txdes;
+-	dma_addr_t txdes_dma;
+-	struct sk_buff **tx_skbs;
+-	unsigned int tx_clean_pointer;
+-	unsigned int tx_pointer;
+-	u32 txdes0_edotr_mask;
+-
+-	/* Used to signal the reset task of ring change request */
+-	unsigned int new_rx_q_entries;
+-	unsigned int new_tx_q_entries;
+-
+-	/* Scratch page to use when rx skb alloc fails */
+-	void *rx_scratch;
+-	dma_addr_t rx_scratch_dma;
+-
+-	/* Component structures */
+-	struct net_device *netdev;
+-	struct device *dev;
+-	struct ncsi_dev *ndev;
+-	struct napi_struct napi;
+-	struct work_struct reset_task;
+-	struct mii_bus *mii_bus;
+-	struct clk *clk;
+-
+-	/* 2600 RMII clock gate */
+-	struct clk *rclk;
+-
+-	/* Link management */
+-	int cur_speed;
+-	int cur_duplex;
+-	bool use_ncsi;
+-	bool use_fixed_phy;
+-
+-	/* Multicast filter settings */
+-	u32 maht0;
+-	u32 maht1;
+-
+-	/* Flow control settings */
+-	bool tx_pause;
+-	bool rx_pause;
+-	bool aneg_pause;
+-
+-	/* Misc */
+-	volatile bool need_mac_restart;
+-	bool is_aspeed;
+-};
+ 
+ static int ftgmac100_reset_mac(struct ftgmac100 *priv, u32 maccr)
+ {
+diff -Naur linux_ori/drivers/net/ethernet/faraday/ftgmac100.h linux/drivers/net/ethernet/faraday/ftgmac100.h
+--- linux_ori/drivers/net/ethernet/faraday/ftgmac100.h	2022-04-25 11:55:38.682004207 +0800
++++ linux/drivers/net/ethernet/faraday/ftgmac100.h	2022-04-25 11:49:53.513137202 +0800
+@@ -272,6 +272,67 @@
+ #define FTGMAC100_RXDES1_UDP_CHKSUM_ERR	(1 << 26)
+ #define FTGMAC100_RXDES1_IP_CHKSUM_ERR	(1 << 27)
+ 
++struct ftgmac100 {
++	/* Registers */
++	struct resource *res;
++	void __iomem *base;
++
++	/* Rx ring */
++	unsigned int rx_q_entries;
++	struct ftgmac100_rxdes *rxdes;
++	dma_addr_t rxdes_dma;
++	struct sk_buff **rx_skbs;
++	unsigned int rx_pointer;
++	u32 rxdes0_edorr_mask;
++
++	/* Tx ring */
++	unsigned int tx_q_entries;
++	struct ftgmac100_txdes *txdes;
++	dma_addr_t txdes_dma;
++	struct sk_buff **tx_skbs;
++	unsigned int tx_clean_pointer;
++	unsigned int tx_pointer;
++	u32 txdes0_edotr_mask;
++
++	/* Used to signal the reset task of ring change request */
++	unsigned int new_rx_q_entries;
++	unsigned int new_tx_q_entries;
++
++	/* Scratch page to use when rx skb alloc fails */
++	void *rx_scratch;
++	dma_addr_t rx_scratch_dma;
++
++	/* Component structures */
++	struct net_device *netdev;
++	struct device *dev;
++	struct ncsi_dev *ndev;
++	struct napi_struct napi;
++	struct work_struct reset_task;
++	struct mii_bus *mii_bus;
++	struct clk *clk;
++
++	/* 2600 RMII clock gate */
++	struct clk *rclk;
++
++	/* Link management */
++	int cur_speed;
++	int cur_duplex;
++	bool use_ncsi;
++	bool use_fixed_phy;
++
++	/* Multicast filter settings */
++	u32 maht0;
++	u32 maht1;
++
++	/* Flow control settings */
++	bool tx_pause;
++	bool rx_pause;
++	bool aneg_pause;
++
++	/* Misc */
++	volatile bool need_mac_restart;
++	bool is_aspeed;
++};
+ 
+ /* self test */
+ #define FTGMAC100_NUM_TESTS		2
+diff -Naur linux_ori/net/ipv6/ndisc.c linux/net/ipv6/ndisc.c
+--- linux_ori/net/ipv6/ndisc.c	2022-04-25 12:01:51.354619234 +0800
++++ linux/net/ipv6/ndisc.c	2022-04-25 12:08:04.469167732 +0800
+@@ -69,6 +69,10 @@
+ #include <linux/netfilter.h>
+ #include <linux/netfilter_ipv6.h>
+ 
++#include <net/ncsi.h>
++#include "../drivers/net/ethernet/faraday/ftgmac100.h"
++#include "../net/ncsi/internal.h"
++
+ static u32 ndisc_hash(const void *pkey,
+ 		      const struct net_device *dev,
+ 		      __u32 *hash_rnd);
+@@ -783,6 +787,13 @@
+ 	bool inc;
+ 	int is_router = -1;
+ 	u64 nonce = 0;
++	struct ftgmac100 *priv = netdev_priv(dev);
++	struct ncsi_dev *nd = NULL;
++	struct ncsi_dev_priv *ndp = NULL;
++
++	struct ncsi_channel *nc;
++	struct ncsi_package *np;
++	int count_nc_enable = 0, count_nc_disable = 0, count_nc_invisble = 0;
+ 
+ 	if (skb->len < sizeof(struct nd_msg)) {
+ 		ND_PRINTK(2, warn, "NS: packet too short\n");
+@@ -846,6 +857,34 @@
+ 						  &ifp->addr, np);
+ 					goto out;
+ 				}
++
++				/* Check if tentative ip address is duplicated on NCSI interface */
++				if (priv->use_ncsi) {
++					nd = ncsi_find_dev(dev);
++					ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
++					if (!ndp) {
++						return -ENODEV;	
++					} // if
++
++					NCSI_FOR_EACH_PACKAGE(ndp, np) {
++						NCSI_FOR_EACH_CHANNEL(np, nc) {
++							if (nc->state == NCSI_CHANNEL_ACTIVE) {
++								count_nc_enable = count_nc_enable + 1;
++							} // if
++							else if (nc->state == NCSI_CHANNEL_INVISIBLE) {
++								count_nc_invisble = count_nc_invisble +1;
++							}
++							else 
++								count_nc_disable = count_nc_disable +1;
++						}
++					}
++
++					if (count_nc_enable > 1 || ndp->package_num > 1) {
++						 	ND_PRINTK(2, notice, "%s: NCSI enables. Ignore duplicated IPv6 address.\n.", dev->name);
++						 	goto out;
++					} // if
++				} // if
++
+ 				/*
+ 				 * We are colliding with another node
+ 				 * who is doing DAD

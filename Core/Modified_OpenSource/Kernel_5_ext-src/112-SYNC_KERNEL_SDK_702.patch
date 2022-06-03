@@ -1,0 +1,460 @@
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/Makefile	2021-12-02 15:33:23.537781728 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/Makefile	2021-12-15 11:52:36.706927323 +0800
+@@ -2,4 +2,4 @@
+ obj-$(CONFIG_USB_ASPEED_VHUB)	+= aspeed-vhub.o
+ aspeed-vhub-y	:= core.o ep0.o epn.o dev.o hub.o
+ 
+-obj-$(CONFIG_ARCH_ASPEED)      += phy.o
++obj-$(CONFIG_ARCH_ASPEED)	+= phy.o
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/core.c	2021-12-02 15:33:23.061784003 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/core.c	2021-12-15 11:53:48.266819696 +0800
+@@ -68,6 +68,7 @@
+ 		   int status)
+ {
+ 	bool internal = req->internal;
++	struct ast_vhub *vhub = ep->vhub;
+ 
+ 	EPVDBG(ep, "completing request @%p, status %d\n", req, status);
+ 
+@@ -78,7 +79,7 @@
+ 
+ 	if (req->req.dma) {
+ 		if (!WARN_ON(!ep->dev))
+-			usb_gadget_unmap_request(&ep->dev->gadget,
++			usb_gadget_unmap_request_by_dev(&vhub->pdev->dev,
+ 						 &req->req, ep->epn.is_in);
+ 		req->req.dma = 0;
+ 	}
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/dev.c	2021-12-02 15:33:23.061784003 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/dev.c	2021-12-15 11:55:11.574700612 +0800
+@@ -115,15 +115,25 @@
+ 				u16 wIndex, u16 wValue,
+ 				bool is_set)
+ {
++	u32 val;
++
+ 	DDBG(d, "%s_FEATURE(dev val=%02x)\n",
+ 	     is_set ? "SET" : "CLEAR", wValue);
+ 
+-	if (wValue != USB_DEVICE_REMOTE_WAKEUP)
+-		return std_req_driver;
++	if (wValue == USB_DEVICE_REMOTE_WAKEUP) {
++		d->wakeup_en = is_set;
++		return std_req_complete;
+ 
+-	d->wakeup_en = is_set;
++	} else if (wValue == USB_DEVICE_TEST_MODE) {
++		val = readl(d->vhub->regs + AST_VHUB_CTRL);
++		val &= ~GENMASK(10, 8);
++		val |= VHUB_CTRL_SET_TEST_MODE((wIndex >> 8) & 0x7);
++		writel(val, d->vhub->regs + AST_VHUB_CTRL);
+ 
+-	return std_req_complete;
++		return std_req_complete;
++	}
++
++	return std_req_driver;
+ }
+ 
+ static int ast_vhub_ep_feature(struct ast_vhub_dev *d,
+@@ -165,7 +175,7 @@
+ 
+ 	DDBG(d, "GET_STATUS(dev)\n");
+ 
+-	st0 = d->gadget.is_selfpowered << USB_DEVICE_SELF_POWERED;
++	st0 = d->gadget.is_selfpowered;
+ 	if (d->wakeup_en)
+ 		st0 |= 1 << USB_DEVICE_REMOTE_WAKEUP;
+ 
+@@ -470,6 +480,19 @@
+ 	return 0;
+ }
+ 
++static int ast_vhub_udc_set_selfpowered(struct usb_gadget *gadget,
++					int is_selfpowered)
++{
++	struct ast_vhub_dev *d = to_ast_dev(gadget);
++	unsigned long flags;
++
++	spin_lock_irqsave(&d->vhub->lock, flags);
++	d->gadget.is_selfpowered = (is_selfpowered != 0);
++	spin_unlock_irqrestore(&d->vhub->lock, flags);
++
++	return 0;
++}
++
+ static int ast_vhub_udc_upstream_connect(struct usb_gadget *gadget)
+ {
+ 	struct ast_vhub_dev *d = to_ast_dev(gadget);
+@@ -493,6 +516,7 @@
+ 	.match_ep	= ast_vhub_udc_match_ep,
+ 	.udc_upstream_connect 		= ast_vhub_udc_upstream_connect,
+ 	.udc_upstream_disconnect	= ast_vhub_udc_upstream_disconnect,
++	.set_selfpowered = ast_vhub_udc_set_selfpowered,
+ };
+ 
+ void ast_vhub_dev_suspend(struct ast_vhub_dev *d)
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/ep0.c	2021-06-03 14:59:17.000000000 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/ep0.c	2021-12-15 13:24:38.604253266 +0800
+@@ -256,6 +256,13 @@
+ 		len = remain;
+ 		rc = -EOVERFLOW;
+ 	}
++
++	/* HW return wrong data len */
++	if (len < ep->ep.maxpacket && len != remain) {
++		EPDBG(ep, "using expected data len instead\n");
++		len = remain;
++	}
++
+ 	if (len && req->req.buf)
+ 		memcpy(req->req.buf + req->req.actual, ep->buf, len);
+ 	req->req.actual += len;
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/epn.c	2021-12-02 15:33:23.061784003 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/epn.c	2021-12-15 13:24:45.112242880 +0800
+@@ -390,7 +390,7 @@
+ 	if (ep->epn.desc_mode ||
+ 	    ((((unsigned long)u_req->buf & 7) == 0) &&
+ 	     (ep->epn.is_in || !(u_req->length & (u_ep->maxpacket - 1))))) {
+-		rc = usb_gadget_map_request(&ep->dev->gadget, u_req,
++		rc = usb_gadget_map_request_by_dev(&vhub->pdev->dev, u_req,
+ 					    ep->epn.is_in);
+ 		if (rc) {
+ 			dev_warn(&vhub->pdev->dev,
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/hub.c	2021-12-02 15:33:23.061784003 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/hub.c	2021-12-15 13:25:16.488192507 +0800
+@@ -220,17 +220,27 @@
+ 				    u16 wIndex, u16 wValue,
+ 				    bool is_set)
+ {
++	u32 val;
++
+ 	EPDBG(ep, "%s_FEATURE(dev val=%02x)\n",
+ 	      is_set ? "SET" : "CLEAR", wValue);
+ 
+-	if (wValue != USB_DEVICE_REMOTE_WAKEUP)
+-		return std_req_stall;
++	if (wValue == USB_DEVICE_REMOTE_WAKEUP) {
++		ep->vhub->wakeup_en = is_set;
++		EPDBG(ep, "Hub remote wakeup %s\n",
++		      is_set ? "enabled" : "disabled");
++		return std_req_complete;
++
++	} else if (wValue == USB_DEVICE_TEST_MODE) {
++		val = readl(ep->vhub->regs + AST_VHUB_CTRL);
++		val &= ~GENMASK(10, 8);
++		val |= VHUB_CTRL_SET_TEST_MODE((wIndex >> 8) & 0x7);
++		writel(val, ep->vhub->regs + AST_VHUB_CTRL);
+ 
+-	ep->vhub->wakeup_en = is_set;
+-	EPDBG(ep, "Hub remote wakeup %s\n",
+-	      is_set ? "enabled" : "disabled");
++		return std_req_complete;
++	}
+ 
+-	return std_req_complete;
++	return std_req_stall;
+ }
+ 
+ static int ast_vhub_hub_ep_feature(struct ast_vhub_ep *ep,
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/phy.c	2021-12-02 15:33:23.537781728 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/phy.c	2021-12-15 13:25:29.016172267 +0800
+@@ -12,49 +12,49 @@
+ #include <asm/io.h>
+ 
+ struct usb_phy_ctrl {
+-       u32 offset;
+-       u32 set_bit;
++	u32 offset;
++	u32 set_bit;
+ };
+ 
+ static int aspeed_usb_phy_probe(struct platform_device *pdev)
+ {
+-       struct device_node *node = pdev->dev.of_node;
+-       struct usb_phy_ctrl *ctrl_data;
+-       void __iomem *base;
+-       int ret;
++	struct device_node *node = pdev->dev.of_node;
++	struct usb_phy_ctrl *ctrl_data;
++	void __iomem *base;
++	int ret;
+ 
+-       ctrl_data = devm_kzalloc(&pdev->dev, sizeof(struct usb_phy_ctrl), GFP_KERNEL);
+-       if (!ctrl_data)
+-               return -ENOMEM;
++	ctrl_data = devm_kzalloc(&pdev->dev, sizeof(struct usb_phy_ctrl), GFP_KERNEL);
++	if (!ctrl_data)
++		return -ENOMEM;
+ 
+-       base = of_iomap(node, 0);
++	base = of_iomap(node, 0);
+ 
+-       ret = of_property_read_u32_array(node, "ctrl", (u32 *)ctrl_data, 2);
+-       if (ret < 0) {
+-               dev_err(&pdev->dev, "Could not read ctrl property\n");
+-               return -EINVAL;
+-       }
++	ret = of_property_read_u32_array(node, "ctrl", (u32 *)ctrl_data, 2);
++	if (ret < 0) {
++		dev_err(&pdev->dev, "Could not read ctrl property\n");
++		return -EINVAL;
++	}
+ 
+-       writel(readl(base + ctrl_data->offset) | BIT(ctrl_data->set_bit),
+-               base + ctrl_data->offset);
++	writel(readl(base + ctrl_data->offset) | BIT(ctrl_data->set_bit),
++		base + ctrl_data->offset);
+ 
+-       dev_info(&pdev->dev, "Initialized USB PHY\n");
++	dev_info(&pdev->dev, "Initialized USB PHY\n");
+ 
+-       return 0;
++	return 0;
+ }
+ 
+ static const struct of_device_id aspeed_usb_phy_dt_ids[] = {
+-       {
+-               .compatible = "aspeed,ast2600-usb-phy",
+-       },
++	{
++		.compatible = "aspeed,ast2600-usb-phy",
++	},
+ };
+ 
+ static struct platform_driver aspeed_usb_phy_driver = {
+-       .probe          = aspeed_usb_phy_probe,
+-       .driver         = {
+-               .name   = KBUILD_MODNAME,
+-               .of_match_table = aspeed_usb_phy_dt_ids,
+-       },
++	.probe		= aspeed_usb_phy_probe,
++	.driver		= {
++		.name	= KBUILD_MODNAME,
++		.of_match_table	= aspeed_usb_phy_dt_ids,
++	},
+ };
+ module_platform_driver(aspeed_usb_phy_driver);
+ 
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/vhub.h	2021-12-02 15:33:23.061784003 +0800
++++ linux-new/drivers/usb/gadget/udc/aspeed-vhub/vhub.h	2021-12-15 13:25:42.096151051 +0800
+@@ -51,8 +51,6 @@
+ #define VHUB_IRQ_USB_CMD_DEADLOCK		(1 << 18)
+ #define VHUB_IRQ_EP_POOL_NAK			(1 << 17)
+ #define VHUB_IRQ_EP_POOL_ACK_STALL		(1 << 16)
+-#define VHUB_IRQ_DEVICE7			(1 << 15)
+-#define VHUB_IRQ_DEVICE6			(1 << 14)
+ #define VHUB_IRQ_DEVICE5			(1 << 13)
+ #define VHUB_IRQ_DEVICE4			(1 << 12)
+ #define VHUB_IRQ_DEVICE3			(1 << 11)
+--- linux/drivers/soc/aspeed/aspeed-udma.c	2021-12-02 15:33:23.673781079 +0800
++++ linux-new/drivers/soc/aspeed/aspeed-udma.c	2021-12-03 17:01:07.723464679 +0800
+@@ -1,3 +1,7 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Copyright 2020 Aspeed Technology Inc.
++ */
+ #include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/interrupt.h>
+@@ -7,7 +11,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/spinlock.h>
+-#include <linux/aspeed-udma.h>
++#include <linux/soc/aspeed/aspeed-udma.h>
+ 
+ #define DEVICE_NAME "aspeed-udma"
+ 
+@@ -27,21 +31,21 @@
+ #define UDMA_RX_DMA_INT_EN	0x038
+ #define UDMA_RX_DMA_INT_STAT	0x03c
+ 
+-#define UDMA_CHX_OFF(x) ((x) * 0x20)
++#define UDMA_CHX_OFF(x)		((x) * 0x20)
+ #define UDMA_CHX_TX_RD_PTR(x)	(0x040 + UDMA_CHX_OFF(x))
+ #define UDMA_CHX_TX_WR_PTR(x)	(0x044 + UDMA_CHX_OFF(x))
+ #define UDMA_CHX_TX_BUF_BASE(x)	(0x048 + UDMA_CHX_OFF(x))
+ #define UDMA_CHX_TX_CTRL(x)	(0x04c + UDMA_CHX_OFF(x))
+-#define 	UDMA_TX_CTRL_TMOUT_DISABLE	BIT(4)
+-#define 	UDMA_TX_CTRL_BUFSZ_MASK		GENMASK(3, 0)
+-#define 	UDMA_TX_CTRL_BUFSZ_SHIFT	0
++#define   UDMA_TX_CTRL_TMOUT_DISABLE	BIT(4)
++#define   UDMA_TX_CTRL_BUFSZ_MASK	GENMASK(3, 0)
++#define   UDMA_TX_CTRL_BUFSZ_SHIFT	0
+ #define UDMA_CHX_RX_RD_PTR(x)	(0x050 + UDMA_CHX_OFF(x))
+ #define UDMA_CHX_RX_WR_PTR(x)	(0x054 + UDMA_CHX_OFF(x))
+ #define UDMA_CHX_RX_BUF_BASE(x)	(0x058 + UDMA_CHX_OFF(x))
+ #define UDMA_CHX_RX_CTRL(x)	(0x05c + UDMA_CHX_OFF(x))
+-#define 	UDMA_RX_CTRL_TMOUT_DISABLE	BIT(4)
+-#define 	UDMA_RX_CTRL_BUFSZ_MASK		GENMASK(3, 0)
+-#define 	UDMA_RX_CTRL_BUFSZ_SHIFT	0
++#define   UDMA_RX_CTRL_TMOUT_DISABLE	BIT(4)
++#define   UDMA_RX_CTRL_BUFSZ_MASK	GENMASK(3, 0)
++#define   UDMA_RX_CTRL_BUFSZ_SHIFT	0
+ 
+ #define UDMA_MAX_CHANNEL	14
+ #define UDMA_TIMEOUT		0x200
+@@ -83,7 +87,7 @@
+ struct aspeed_udma {
+ 	struct device *dev;
+ 	u8 __iomem *regs;
+-	u32 irq;
++	int irq;
+ 	struct aspeed_udma_chan tx_chs[UDMA_MAX_CHANNEL];
+ 	struct aspeed_udma_chan rx_chs[UDMA_MAX_CHANNEL];
+ 	spinlock_t lock;
+@@ -132,15 +136,13 @@
+ 
+ static u32 aspeed_udma_get_rx_wptr(u32 ch_no)
+ {
+-	return readl(udma->regs + UDMA_CHX_RX_WR_PTR(ch_no));	
++	return readl(udma->regs + UDMA_CHX_RX_WR_PTR(ch_no));
+ }
+ 
+ static void aspeed_udma_set_ptr(u32 ch_no, u32 ptr, bool is_tx)
+ {
+ 	writel(ptr, udma->regs +
+-			((is_tx) ? 
+-			UDMA_CHX_TX_WR_PTR(ch_no) :
+-			UDMA_CHX_RX_RD_PTR(ch_no)));
++	       ((is_tx) ? UDMA_CHX_TX_WR_PTR(ch_no) : UDMA_CHX_RX_RD_PTR(ch_no)));
+ }
+ 
+ void aspeed_udma_set_tx_wptr(u32 ch_no, u32 wptr)
+@@ -234,8 +236,7 @@
+ 		writel(reg, udma->regs + UDMA_CHX_TX_CTRL(ch_no));
+ 
+ 		writel(addr, udma->regs + UDMA_CHX_TX_BUF_BASE(ch_no));
+-	}
+-	else {
++	} else {
+ 		reg = readl(udma->regs + UDMA_RX_DMA_INT_EN);
+ 		if (reg & (0x1 << ch_no)) {
+ 			retval = -EBUSY;
+@@ -410,7 +411,7 @@
+ 	reg = ((UDMA_BUFSZ_CODE_4KB << UDMA_MISC_TX_BUFSZ_SHIFT) & UDMA_MISC_TX_BUFSZ_MASK) |
+ 	      ((UDMA_BUFSZ_CODE_64KB << UDMA_MISC_RX_BUFSZ_SHIFT) & UDMA_MISC_RX_BUFSZ_MASK);
+ 	writel(reg, udma->regs + UDMA_MISC);
+-	
++
+ 	for (i = 0; i < UDMA_MAX_CHANNEL; ++i) {
+ 		writel(0, udma->regs + UDMA_CHX_TX_WR_PTR(i));
+ 		writel(0, udma->regs + UDMA_CHX_RX_RD_PTR(i));
+--- linux/include/linux/soc/aspeed/aspeed-udma.h	2021-12-03 17:58:19.562044309 +0800
++++ linux-new/include/linux/soc/aspeed/aspeed-udma.h	2021-12-03 17:56:38.886146660 +0800
+@@ -0,0 +1,30 @@
++#ifndef __ASPEED_UDMA_H__
++#define __ASPEED_UDMA_H__
++
++#include <linux/circ_buf.h>
++
++typedef void (*aspeed_udma_cb_t)(int rb_rwptr, void *id);
++
++enum aspeed_udma_ops {
++	ASPEED_UDMA_OP_ENABLE,
++	ASPEED_UDMA_OP_DISABLE,
++	ASPEED_UDMA_OP_RESET,
++};
++
++void aspeed_udma_set_tx_wptr(u32 ch_no, u32 wptr);
++void aspeed_udma_set_rx_rptr(u32 ch_no, u32 rptr);
++
++void aspeed_udma_tx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op);
++void aspeed_udma_rx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op);
++
++int aspeed_udma_request_tx_chan(u32 ch_no, dma_addr_t addr,
++				struct circ_buf *rb, u32 rb_sz,
++				aspeed_udma_cb_t cb, void *id, bool en_tmout);
++int aspeed_udma_request_rx_chan(u32 ch_no, dma_addr_t addr,
++				struct circ_buf *rb, u32 rb_sz,
++				aspeed_udma_cb_t cb, void *id, bool en_tmout);
++
++int aspeed_udma_free_tx_chan(u32 ch_no);
++int aspeed_udma_free_rx_chan(u32 ch_no);
++
++#endif
+--- linux/drivers/tty/serial/8250/8250_aspeed.c	2021-12-02 15:33:23.893780027 +0800
++++ linux-new/drivers/tty/serial/8250/8250_aspeed.c	2021-12-03 18:02:47.713737897 +0800
+@@ -17,7 +17,7 @@
+ #include <linux/circ_buf.h>
+ #include <linux/tty_flip.h>
+ #include <linux/pm_runtime.h>
+-#include <linux/aspeed-udma.h>
++#include <linux/soc/aspeed/aspeed-udma.h>
+ 
+ #include "8250.h"
+ 
+--- linux/include/linux/aspeed-udma.h	2021-12-02 15:33:22.849785017 +0800
++++ linux-new/include/linux/aspeed-udma.h	1970-01-01 08:00:00.000000000 +0800
+@@ -1,30 +0,0 @@
+-#ifndef __ASPEED_UDMA_H__
+-#define __ASPEED_UDMA_H__
+-
+-#include <linux/circ_buf.h>
+-
+-typedef void (*aspeed_udma_cb_t)(int rb_rwptr, void *id);
+-
+-enum aspeed_udma_ops {
+-	ASPEED_UDMA_OP_ENABLE,
+-	ASPEED_UDMA_OP_DISABLE,
+-	ASPEED_UDMA_OP_RESET,
+-};
+-
+-void aspeed_udma_set_tx_wptr(u32 ch_no, u32 wptr);
+-void aspeed_udma_set_rx_rptr(u32 ch_no, u32 rptr);
+-
+-void aspeed_udma_tx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op);
+-void aspeed_udma_rx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op);
+-
+-int aspeed_udma_request_tx_chan(u32 ch_no, dma_addr_t addr,
+-				struct circ_buf *rb, u32 rb_sz,
+-				aspeed_udma_cb_t cb, void *id, bool en_tmout);
+-int aspeed_udma_request_rx_chan(u32 ch_no, dma_addr_t addr,
+-				struct circ_buf *rb, u32 rb_sz,
+-				aspeed_udma_cb_t cb, void *id, bool en_tmout);
+-
+-int aspeed_udma_free_tx_chan(u32 ch_no);
+-int aspeed_udma_free_rx_chan(u32 ch_no);
+-
+-#endif
+--- linux/include/dt-bindings/clock/ast2600-clock.h	2021-12-08 11:10:26.011649613 +0800
++++ linux-new/include/dt-bindings/clock/ast2600-clock.h	2021-12-10 13:53:39.223759765 +0800
+@@ -58,7 +58,7 @@
+ #define ASPEED_CLK_GATE_I3C3CLK		41
+ #define ASPEED_CLK_GATE_I3C4CLK		42
+ #define ASPEED_CLK_GATE_I3C5CLK		43
+-#define ASPEED_CLK_GATE_I3C6CLK		44
++#define ASPEED_CLK_GATE_RESERVED44	44
+ #define ASPEED_CLK_GATE_FSICLK		45
+ 
+ #define ASPEED_CLK_HPLL			46
+@@ -73,7 +73,7 @@
+ #define ASPEED_CLK_D1CLK		55
+ #define ASPEED_CLK_VCLK			56
+ #define ASPEED_CLK_LHCLK		57
+-#define ASPEED_CLK_UART			58
++#define ASPEED_CLK_UART5		58
+ #define ASPEED_CLK_UARTX		59
+ #define ASPEED_CLK_HUARTX		60
+ 
+@@ -110,7 +110,7 @@
+ #define ASPEED_RESET_RESERVE49	49
+ #define ASPEED_RESET_RESERVE48	48
+ #define ASPEED_RESET_I3C7		47
+-#define ASPEED_RESET_I3C6		46
++#define ASPEED_RESET_RESERVED46		46
+ #define ASPEED_RESET_I3C5		45
+ #define ASPEED_RESET_I3C4		44
+ #define ASPEED_RESET_I3C3		43
+--- linux/drivers/usb/host/ehci-hcd.c   2022-03-28 14:50:51.564012637 +0800
++++ linux-5.4.184/drivers/usb/host/ehci-hcd.c   2022-03-30 10:20:06.152469472 +0800
+@@ -636,7 +636,7 @@
+        msleep(5);
+
+        /* For Aspeed, STS_HALT also depends on ASS/PSS status.
+-        * Check CMD_RUN instead.
++        * Skip this check on startup.
+         */
+        if (ehci->is_aspeed)
+                rc = ehci_handshake(ehci, &ehci->regs->command, CMD_RUN,

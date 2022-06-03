@@ -107,6 +107,7 @@ typedef unsigned char mod_websocket_bool_t;
 #define	MOD_WEBSOCKET_ERRNO_MAP(GEN)    \
     GEN(OK, 200)                        \
     GEN(BAD_REQUEST, 400)               \
+    GEN(UNAUTHORIZED, 401)              \
     GEN(FORBIDDEN, 403)                 \
     GEN(NOT_FOUND, 404)                 \
     GEN(INTERNAL_SERVER_ERROR, 500)     \

@@ -1,0 +1,46 @@
+--- linux_org/drivers/i2c/busses/i2c-new-aspeed.c	2022-03-29 21:52:32.472337363 +0530
++++ linux_patches/drivers/i2c/busses/i2c-new-aspeed.c	2022-03-29 23:09:38.302253276 +0530
+@@ -361,7 +361,7 @@
+ 	{ 3072, 0x00000300 | (0x7) | (0xb << 20) | (0xb << 16) | (0xb << 12) },
+ };
+ 
+-
++extern int i2c_slave_state[MAX_I2C_ADAPTERS] = {0};
+ 
+ static u32 aspeed_select_i2c_clock(struct aspeed_new_i2c_bus *i2c_bus)
+ {
+@@ -551,6 +551,7 @@
+ 	u8 value;
+ 	int i = 0;
+ 
++	i2c_slave_state[i2c_bus->adap.nr] = 0;
+ 	//clear irq fisrt
+ 	writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);
+ 
+@@ -652,6 +653,7 @@
+ 		if (sts & AST_I2CS_STOP)
+ 			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_STOP, &value);
+ 		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
++		i2c_slave_state[i2c_bus->adap.nr] = I2C_SLAVE_STOP; // To check in channel deselect
+ 		break;
+ 
+ 	/* it is Mw data Mr coming -> it need send tx */
+@@ -868,7 +870,10 @@
+ 	u32 sts = readl(i2c_bus->reg_base + AST_I2CS_ISR);
+ 
+ 	if (!(sts & ier))
++	{
++		i2c_slave_state[i2c_bus->adap.nr] = 0;
+ 		return 0;
++	}
+ 	dev_dbg(i2c_bus->dev, "slave irq sts %x sts [%x]\n", sts, readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 
+ 	sts &= ~(AST_I2CS_ADDR_INDICATE_MASK | AST_I2CS_SLAVE_PENDING);
+@@ -1773,6 +1778,7 @@
+ };
+ module_platform_driver(aspeed_new_i2c_bus_driver);
+ 
++EXPORT_SYMBOL(i2c_slave_state);
+ MODULE_AUTHOR("Ryan Chen <ryan_chen@aspeedtech.com>");
+ MODULE_DESCRIPTION("ASPEED I2C New Mode Bus Driver");
+ MODULE_LICENSE("GPL v2");

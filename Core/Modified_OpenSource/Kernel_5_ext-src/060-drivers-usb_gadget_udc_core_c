@@ -1,0 +1,116 @@
+--- linux/drivers/usb/gadget/udc/core.c	2021-04-13 12:08:15.662091258 +0800
++++ linux.new/drivers/usb/gadget/udc/core.c	2021-04-22 14:39:56.402675261 +0800
+@@ -1104,26 +1104,41 @@
+ {
+ 	struct usb_udc *udc;
+ 
+-	if(virtual_device_status == 1)
+-		return 0;
+-	if(gadget != NULL) {
+-		gadget->ops->udc_upstream_connect(gadget);
+-	} else {
+-	/* For now we take the first available UDC */
+-		mutex_lock(&udc_lock);
+-		list_for_each_entry(udc, &udc_list, list) {
+-			if (udc->gadget!= NULL) {
+-				break;
++	if(gadget != NULL)
++	{
++		if(gadget->name != NULL)
++		{
++			if( strcmp(gadget->name, "aspeed-udc") == 0)
++			{
++				printk("It's the port B device, doesn't need to handle it\n");
++				return 0;
+ 			}
+ 		}
+-		mutex_unlock(&udc_lock);
+-		if(udc->gadget == NULL) {
+-			//not found available gadget
+-			return -1;
++		if(virtual_device_status == 1)
++			return 0;
++		if(gadget != NULL) {
++			gadget->ops->udc_upstream_connect(gadget);
++		} else {
++		/* For now we take the first available UDC */
++			mutex_lock(&udc_lock);
++			list_for_each_entry(udc, &udc_list, list) {
++				if (udc->gadget!= NULL) {
++					break;
++				}
++			}
++			mutex_unlock(&udc_lock);
++			if(udc->gadget == NULL) {
++				//not found available gadget
++				return -1;
++			}
++			udc->gadget->ops->udc_upstream_connect(udc->gadget);	
+ 		}
+-		udc->gadget->ops->udc_upstream_connect(udc->gadget);	
++		virtual_device_status = 1;
++	}
++	else
++	{
++		printk("Gadget device is NULL\n");
+ 	}
+-	virtual_device_status = 1;
+ 	return 0;
+ }
+ 
+@@ -1133,26 +1148,38 @@
+ {
+ 	struct usb_udc *udc;
+ 
+-	if(virtual_device_status == 0)
+-		return 0;
+-	if(gadget != NULL) {
+-		gadget->ops->udc_upstream_disconnect(gadget);
+-	} else {
+-	/* For now we take the first available UDC */
+-		mutex_lock(&udc_lock);
+-		list_for_each_entry(udc, &udc_list, list) {
+-			if (udc->gadget!= NULL) {
+-				break;
++	if(gadget != NULL)
++	{
++                if(gadget->name != NULL)
++                {
++                        if( strcmp(gadget->name, "aspeed-udc") == 0)
++                        {
++                                printk("It's the port B device, doesn't need to handle it\n");
++                                return 0;
++                        }
++                }
++
++		if(virtual_device_status == 0)
++			return 0;
++		if(gadget != NULL) {
++			gadget->ops->udc_upstream_disconnect(gadget);
++		} else {
++		/* For now we take the first available UDC */
++			mutex_lock(&udc_lock);
++			list_for_each_entry(udc, &udc_list, list) {
++				if (udc->gadget!= NULL) {
++					break;
++				}
+ 			}
++			mutex_unlock(&udc_lock);
++			if(udc->gadget == NULL) {
++				//not found available gadget
++				return -1;
++			}
++			udc->gadget->ops->udc_upstream_disconnect(udc->gadget);	
+ 		}
+-		mutex_unlock(&udc_lock);
+-		if(udc->gadget == NULL) {
+-			//not found available gadget
+-			return -1;
+-		}
+-		udc->gadget->ops->udc_upstream_disconnect(udc->gadget);	
++		virtual_device_status = 0;
+ 	}
+-	virtual_device_status = 0;
+ 
+ 	return 0;
+ }

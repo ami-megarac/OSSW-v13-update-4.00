@@ -1,0 +1,87 @@
+--- linux_org/drivers/mtd/concat/mtd-concat.c	2021-09-15 17:00:39.660163071 +0800
++++ linux/drivers/mtd/concat/mtd-concat.c	2021-09-15 17:02:57.000000000 +0800
+@@ -15,7 +15,7 @@
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+ #include <linux/slab.h>
+-
++#include "../mtdcore.h"
+ /*
+  * struct of_mtd_concat - platform device driver data.
+  * @cmtd the final mtd_concat device
+@@ -59,8 +59,20 @@
+        struct device_node *node = pdev->dev.of_node;
+        struct of_phandle_iterator it;
+        struct of_mtd_concat *info;
+-       struct mtd_info *mtd;
+-       int err = 0, count;
++       struct mtd_info *mtd,*mtd_tmp[3];
++       int err = 0, count=0,index;
++
++       // AMI: Before Concat, remove the top 3 original mtd label named not bmc .
++       mtd_for_each_device(mtd) { 
++               if((strncmp(mtd->name,"bmc",3) != 0)&&(count <3)) {  
++                       mtd_tmp[count]=get_mtd_device(mtd,mtd->index);
++                       count++;
++               }    
++       } 
++       for(index=0;index<count;index++) {
++               put_mtd_device(mtd_tmp[index]);
++               mtd_device_unregister(mtd_tmp[index]); 
++       }
+ 
+        count = of_count_phandle_with_args(node, "devices", NULL);
+        if (count <= 0)
+--- linux_org/drivers/spi/Kconfig	2021-09-15 17:00:47.016158835 +0800
++++ linux/drivers/spi/Kconfig	2021-09-15 17:02:44.000000000 +0800
+@@ -67,6 +67,14 @@
+ 	help
+ 	  This is the driver for the Altera SPI Controller.
+ 
++config SPI_ASPEED
++	tristate "ASPEED SPI Controller"
++	depends on OF && HAS_IOMEM
++	help
++	  This is a driver for ASPEED SPI Controller. This driver
++	  is not a generic pure SPI driver, which is especially
++	  designed for spi-mem framework.
++
+ config SPI_ATH79
+ 	tristate "Atheros AR71XX/AR724X/AR913X SPI controller driver"
+ 	depends on ATH79 || COMPILE_TEST
+--- linux_org/drivers/spi/Makefile	2021-09-15 17:00:58.420150200 +0800
++++ linux/drivers/spi/Makefile	2021-09-15 17:02:50.000000000 +0800
+@@ -16,6 +16,7 @@
+ obj-$(CONFIG_SPI_FMC)			+= fmc_spi.o
+ obj-$(CONFIG_SPI_ALTERA)		+= spi-altera.o
+ obj-$(CONFIG_SPI_ARMADA_3700)		+= spi-armada-3700.o
++obj-$(CONFIG_SPI_ASPEED)		+= spi-aspeed.o
+ obj-$(CONFIG_SPI_ATMEL)			+= spi-atmel.o
+ obj-$(CONFIG_SPI_ATMEL_QUADSPI)		+= atmel-quadspi.o
+ obj-$(CONFIG_SPI_AT91_USART)		+= spi-at91-usart.o
+--- linux_org/drivers/spi/spi-aspeed.c	2021-09-15 17:01:06.268142829 +0800
++++ linux/drivers/spi/spi-aspeed.c	2021-09-15 17:02:37.000000000 +0800
+@@ -1427,7 +1427,22 @@
+ 	.probe = aspeed_spi_probe,
+ 	.remove = aspeed_spi_remove,
+ };
+-module_platform_driver(aspeed_spi_driver);
++/* AMI
++ * spi driver register needs to be done before
++ * mtd-concat access spi flash node.
++ * Hence aspeed_spi_init() is a subsys_initcall.
++ */
++static int __init aspeed_spi_init(void)
++{
++  return platform_driver_register(&aspeed_spi_driver);
++}
++subsys_initcall(aspeed_spi_init);
++
++static void __exit aspeed_spi_exit(void)
++{
++  platform_driver_unregister(&aspeed_spi_driver);
++}
++module_exit(aspeed_spi_exit);
+ 
+ MODULE_DESCRIPTION("ASPEED FMC/SPI Memory Controller Driver");
+ MODULE_AUTHOR("Chin-Ting Kuo <chin-ting_kuo@aspeedtech.com>");

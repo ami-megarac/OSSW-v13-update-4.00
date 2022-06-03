@@ -1,0 +1,40 @@
+diff -Naur linux_org/net/ncsi/ncsi-manage.c linux/net/ncsi/ncsi-manage.c
+--- linux_org/net/ncsi/ncsi-manage.c	2021-12-08 16:38:56.953843000 +0800
++++ linux/net/ncsi/ncsi-manage.c	2021-12-08 16:30:03.503302586 +0800
+@@ -1713,6 +1713,8 @@
+ 		
+ 		NCSI_FOR_EACH_PACKAGE(ndp, np_init) {
+ 			NCSI_FOR_EACH_CHANNEL(np_init, nc_init) {				
++				if (!(np_init->channel_whitelist & 0x1 << nc_init->id))
++					continue;
+ 				if(ncsi_channel_has_link(nc_init)){
+ 					if(ncsi_update_tx_channel(ndp, nc_init->package, NULL, nc_init) == 0)
+ 						break;
+@@ -2056,6 +2058,7 @@
+ 		ndp->flags &= ~NCSI_DEV_RESET;
+ 		spin_unlock_irqrestore(&ndp->lock, flags);
+ 		ndp->polling.id = 32;	
++		ndp->polling.status = 0;
+ 		InitComplete = 0;
+ 		msleep(500);
+ 		return ncsi_choose_active_channel(ndp);
+diff -Naur linux_org/net/ncsi/ncsi-rsp.c linux/net/ncsi/ncsi-rsp.c
+--- linux_org/net/ncsi/ncsi-rsp.c	2021-12-08 16:38:56.945844000 +0800
++++ linux/net/ncsi/ncsi-rsp.c	2021-12-08 16:31:53.046075420 +0800
+@@ -333,10 +333,12 @@
+ 	ncm->data[4] = ntohl(rsp->oem_status);		
+ 	
+ #ifdef CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS	   
+-	if(ntohl(rsp->status)&0x1){
+-		ndp->polling.status |= (0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));	
+-	}else{
+-		ndp->polling.status &= ~(0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));
++	if (np->channel_whitelist & 0x1 << rsp->rsp.common.channel){
++		if(ntohl(rsp->status)&0x1){
++			ndp->polling.status |= (0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));	
++		}else{
++			ndp->polling.status &= ~(0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));
++		}
+ 	}
+ 	
+ 	//Check link status at received last channel status

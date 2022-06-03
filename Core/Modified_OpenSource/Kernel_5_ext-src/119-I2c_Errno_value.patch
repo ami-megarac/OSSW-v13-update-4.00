@@ -1,0 +1,20 @@
+--- linux/drivers/i2c/busses/i2c-new-aspeed.c	2022-01-11 10:21:19.576969000 +0800
++++ linux_n/drivers/i2c/busses/i2c-new-aspeed.c	2022-01-19 10:01:30.373067293 +0800
+@@ -1315,7 +1315,7 @@
+ 	timeout = wait_for_completion_timeout(&i2c_bus->cmd_complete, i2c_bus->adap.timeout);
+ 	if (timeout == 0) {
+ 		int isr = readl(i2c_bus->reg_base + AST_I2CM_ISR);
+-
++		i2c_bus->cmd_err = -ENXIO;
+ 		dev_dbg(i2c_bus->dev, "timeout isr[%x], sts[%x]\n", isr,
+ 					readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 		if (isr || (readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF) & AST_I2CC_TX_DIR_MASK)) {
+@@ -1345,7 +1345,7 @@
+ 			}
+ #endif
+ 		}
+-		return -ETIMEDOUT;
++		return -ENXIO;
+ 	}
+ 
+ 	dev_dbg(i2c_bus->dev, "bus%d-m: %d end\n", i2c_bus->adap.nr, i2c_bus->cmd_err);

@@ -1,0 +1,9 @@
+--- linux/drivers/usb/gadget/udc/Makefile	2020-12-21 20:27:07.000000000 +0800
++++ linux.new/drivers/usb/gadget/udc/Makefile	2021-04-13 14:02:42.691453999 +0800
+@@ -39,5 +39,6 @@
+ obj-$(CONFIG_USB_GR_UDC)	+= gr_udc.o
+ obj-$(CONFIG_USB_GADGET_XILINX)	+= udc-xilinx.o
+ obj-$(CONFIG_USB_SNP_UDC_PLAT) += snps_udc_plat.o
++obj-$(CONFIG_USB_ASPEED)        += aspeed_udc.o
+ obj-$(CONFIG_USB_ASPEED_VHUB)	+= aspeed-vhub/
+ obj-$(CONFIG_USB_BDC_UDC)	+= bdc/

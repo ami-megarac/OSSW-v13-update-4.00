@@ -1,0 +1,313 @@
+--- linux-5.4.85/drivers/usb/gadget/composite.c	2021-04-15 16:08:43.089756085 +0800
++++ linux-5.4.85-new/drivers/usb/gadget/composite.c	2021-04-19 16:16:08.244333445 +0800
+@@ -840,9 +840,9 @@
+ 		result = 0;
+ 	}
+ 
+-	INFO(cdev, "%s config #%d: %s\n",
+-	     usb_speed_string(gadget->speed),
+-	     number, c ? c->label : "unconfigured");
++	DBG(cdev, "%s config #%d: %s\n",
++	    usb_speed_string(gadget->speed),
++	    number, c ? c->label : "unconfigured");
+ 
+ 	if (!c)
+ 		goto done;
+--- linux-5.4.85/drivers/usb/gadget/configfs.c	2021-04-15 16:08:43.089756085 +0800
++++ linux-5.4.85-new/drivers/usb/gadget/configfs.c	2021-04-22 14:39:01.490796327 +0800
+@@ -9,6 +9,22 @@
+ #include "configfs.h"
+ #include "u_f.h"
+ #include "u_os_desc.h"
++#include "function/u_ecm.h"
++#include "function/u_ether.h"
++#include "function/u_rndis.h"
++#include "function/ami_gadget_ioctl.h"	// for ami media redirection.
++#include <linux/cdev.h>
++#include <linux/errno.h>
++#include <linux/usb/gadget.h>
++
++#define USBG_MINORS		4
++#define USBG_CLASS_NAME		"usbg"
++
++static int major, minors;
++
++static struct class *usb_gadget_class;	// a class for usb gadget.
++static DEFINE_IDA(usbg_ida);
++static DEFINE_MUTEX(usbg_ida_lock); /* protects access to usbg_ida */
+ 
+ int check_user_usb_string(const char *name,
+ 		struct usb_gadget_strings *stringtab_dev)
+@@ -61,6 +77,9 @@
+ 	bool use_os_desc;
+ 	char b_vendor_code;
+ 	char qw_sign[OS_STRING_QW_SIGN_LEN];
++	int			minor;
++	struct cdev		gcdev;	// For creating device node.
++	spinlock_t		glock;	/* lock this structure */	
+ 	spinlock_t spinlock;
+ 	bool unbind;
+ };
+@@ -1236,12 +1255,152 @@
+ 	}
+ }
+ 
++static void borrow_network_to_rndis(struct gadget_info *gi,struct usb_composite_dev *cdev)
++{
++	struct usb_function_instance	*ecm_fi;
++	struct usb_function_instance	*rndis_fi;
++	struct f_ecm_opts		*ecm_opts = NULL;
++
++	if(!list_empty(&gi->available_func)) {
++		list_for_each_entry(ecm_fi, &gi->available_func, cfs_list) {
++
++			if(strcmp(ecm_fi->group.cg_item.ci_name, "ecm.usb0") == 0) {
++				ecm_opts = container_of(ecm_fi, struct f_ecm_opts, func_inst);
++				if(cdev->gadget != NULL) {
++					mutex_lock(&ecm_opts->lock);
++					gether_set_gadget(ecm_opts->net, cdev->gadget);
++					gether_register_netdev(ecm_opts->net);
++					mutex_unlock(&ecm_opts->lock);
++					ecm_opts->bound = true;
++
++					list_for_each_entry(rndis_fi, &gi->available_func, cfs_list) {
++
++						if(strcmp(rndis_fi->group.cg_item.ci_name, "rndis.usb0") == 0) {
++							rndis_borrow_net(rndis_fi, ecm_opts->net);
++						}
++					}
++				}
++			}
++		}
++	}
++}
++
++void usbg_cleanup(void)
++{
++	if (major) {
++		unregister_chrdev_region(MKDEV(major, 0), minors);
++		major = minors = 0;
++	}
++
++	class_destroy(usb_gadget_class);
++	usb_gadget_class = NULL;
++}
++
++int usbg_setup(struct usb_gadget *g, int count)
++{
++	int status;
++	dev_t dev;
++	usb_gadget_class = class_create(THIS_MODULE, USBG_CLASS_NAME);
++	if (IS_ERR(usb_gadget_class)) {
++		status = PTR_ERR(usb_gadget_class);
++		usb_gadget_class = NULL;
++		return status;
++	}
++
++	status = alloc_chrdev_region(&dev, 0, count, USBG_CLASS_NAME);
++	if (status) {
++		class_destroy(usb_gadget_class);
++		usb_gadget_class = NULL;
++		return status;
++	}
++
++	major = MAJOR(dev);
++	minors = count;
++
++	return 0;
++}
++
++static inline int usbg_get_minor(void)
++{
++	int ret;
++
++	ret = ida_simple_get(&usbg_ida, 0, 0, GFP_KERNEL);
++	if (ret >= USBG_MINORS) {
++		ida_simple_remove(&usbg_ida, ret);
++		ret = -ENODEV;
++	}
++
++	return ret;
++}
++
++static inline void usbg_put_minor(int minor)
++{
++	mutex_lock(&usbg_ida_lock);
++
++	ida_simple_remove(&usbg_ida, minor);
++	if (ida_is_empty(&usbg_ida))
++		usbg_cleanup();
++
++	mutex_unlock(&usbg_ida_lock);
++}
++
++/* Functions for Device node */
++static int usb_gadget_release(struct inode *inode, struct file *fd)
++{
++	fd->private_data = NULL;
++	return 0;
++}
++
++static int usb_gadget_open(struct inode *inode, struct file *fd)
++{
++	struct gadget_info *gi = container_of(inode->i_cdev, struct gadget_info,gcdev);
++
++	fd->private_data = gi;
++	return 0;
++}
++
++static long ami_usb_gadget_ioctl(struct file *fd, unsigned int code, unsigned long arg)
++{
++	struct gadget_info	*gi = fd->private_data;
++	int	status = 0;
++	int DeviceStatus = 0;
++	/* handle ioctls */
++
++	/* TODO */
++
++	switch (code) {
++		case USB_ENABLE_ALL_DEVICE:
++			status = usb_gadget_vhub_upstream_enalbe(gi->cdev.gadget);
++			break;
++		case USB_DISABLE_ALL_DEVICE:
++			status = usb_gadget_vhub_upstream_disable(gi->cdev.gadget);
++			break;
++		case USB_GET_ALL_DEVICE_STATUS:
++			status = copy_from_user(&DeviceStatus, (void __user *)arg, sizeof(DeviceStatus));
++			status = usb_gadget_get_all_device_status(&DeviceStatus);
++			status = copy_to_user((void __user *)arg, &DeviceStatus, sizeof(DeviceStatus));
++			break;
++		default:
++			/* could not handle ioctl */
++			pr_err("ami_usb_gadget_ioctl: ERROR cmd=0x%4.4xis not supported\n",
++					code);
++			status = -ENOTTY;
++			break;
++	}
++	return status;
++}
++
++static const struct file_operations usb_gadget_fops = {
++	.owner			= THIS_MODULE,
++	.open			= usb_gadget_open,
++	.release		= usb_gadget_release,
++	.unlocked_ioctl 	= ami_usb_gadget_ioctl	// TODO....
++};
+ static int configfs_composite_bind(struct usb_gadget *gadget,
+ 		struct usb_gadget_driver *gdriver)
+ {
+ 	struct usb_composite_driver     *composite = to_cdriver(gdriver);
+-	struct gadget_info		*gi = container_of(composite,
+-						struct gadget_info, composite);
++	struct gadget_info		*gi = container_of(composite,struct gadget_info, composite);
+ 	struct usb_composite_dev	*cdev = &gi->cdev;
+ 	struct usb_configuration	*c;
+ 	struct usb_string		*s;
+@@ -1258,6 +1417,8 @@
+ 	/* and now the gadget bind */
+ 	ret = -EINVAL;
+ 
++	borrow_network_to_rndis(gi, cdev);
++
+ 	if (list_empty(&gi->cdev.configs)) {
+ 		pr_err("Need at least one configuration in %s.\n",
+ 				gi->composite.name);
+@@ -1369,6 +1530,9 @@
+ 	}
+ 
+ 	usb_ep_autoconfig_reset(cdev->gadget);
++	if(!cdev->gadget->connected)  {
++		usb_gadget_vhub_upstream_enalbe(gadget);
++	}
+ 	return 0;
+ 
+ err_purge_funcs:
+@@ -1517,7 +1681,12 @@
+ 		struct config_group *group,
+ 		const char *name)
+ {
+-	struct gadget_info *gi;
++	struct gadget_info 	*gi;
++	dev_t 			dev;
++	struct device		*device;
++	int 			status,ret;
++	struct config_item 	*item;
++	int 			Null_device = 0;
+ 
+ 	gi = kzalloc(sizeof(*gi), GFP_KERNEL);
+ 	if (!gi)
+@@ -1565,9 +1734,64 @@
+ 	if (!gi->composite.gadget_driver.function)
+ 		goto err;
+ 
++	item = config_group_find_item(group,"hid");
++	if(item == NULL) {
++		Null_device++;
++	}
++	item = config_group_find_item(group,"eth");
++	if(item == NULL) {
++		Null_device++;
++	}
++
++	item = config_group_find_item(group,"cdrom");
++	if(item == NULL) {
++		Null_device++;
++	}
++
++	item = config_group_find_item(group,"hddisk");
++	if(item == NULL) {
++		Null_device++;
++	}
++	if(Null_device == 4)  {
++		cdev_init(&gi->gcdev, &usb_gadget_fops);
++		
++		mutex_lock(&usbg_ida_lock);
++		
++		if (ida_is_empty(&usbg_ida)) {
++			status = usbg_setup(NULL, USBG_MINORS);
++			if (status)  {
++				goto unlock;
++			}
++		}
++		gi->minor = usbg_get_minor();
++		
++		if (gi->minor < 0) {
++			if (ida_is_empty(&usbg_ida))
++				usbg_cleanup();
++			goto unlock;
++		}
++		dev = MKDEV(major, gi->minor);
++		
++		ret = cdev_add(&gi->gcdev, dev, 1);
++		if (ret) {
++			goto fail;
++		}
++		device = device_create(usb_gadget_class, NULL, dev, NULL,
++					   "%s%d", "usbg", gi->minor);
++		if (IS_ERR(device)) {
++			ret = PTR_ERR(device);
++			goto del;
++		}
++	}
+ 	return &gi->group;
++del:
++	cdev_del(&gi->gcdev);
+ err:
+ 	kfree(gi);
++unlock:
++	mutex_unlock(&usbg_ida_lock);
++
++fail:
+ 	return ERR_PTR(-ENOMEM);
+ }
+ 
+--- linux-5.4.85/drivers/usb/gadget/Makefile	2021-04-15 16:08:43.089756085 +0800
++++ linux-5.4.85-new/drivers/usb/gadget/Makefile	2021-04-22 14:40:00.725494368 +0800
+@@ -5,6 +5,7 @@
+ subdir-ccflags-$(CONFIG_USB_GADGET_DEBUG)	:= -DDEBUG
+ subdir-ccflags-$(CONFIG_USB_GADGET_VERBOSE)	+= -DVERBOSE_DEBUG
+ ccflags-y				+= -I$(srctree)/drivers/usb/gadget/udc
++ccflags-y				+= -I$(srctree)/../../include/global/
+ 
+ obj-$(CONFIG_USB_LIBCOMPOSITE)	+= libcomposite.o
+ libcomposite-y			:= usbstring.o config.o epautoconf.o

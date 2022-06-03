@@ -223,10 +223,14 @@ static inline void remove_interrupt(char* type, pending_interrupt_info **front, 
     else
     {
         delnode=*front;
-        *front=(*front)->next;
+        if(((*front)->next)!= NULL)
+        	*front=(*front)->next;
+        else
+        {
+        	*front = NULL;
+        	*rear = NULL;
+        }
         kfree(delnode);
-		if(*front == NULL)
-			*rear = NULL;
     }
 }
 
@@ -613,7 +617,8 @@ gpio_ioctlUnlocked(struct file *file, unsigned int cmd, unsigned long arg)
                 return -1;
         for(i=0;i<total_interrupt_sensors;i++)
         {
-            g_gpiopinlist[intr_sensors[i].gpio_number] += 1;
+        	if(( intr_sensors[i].gpio_number >=0 ) && ( intr_sensors[i].gpio_number < 256) )
+            	g_gpiopinlist[intr_sensors[i].gpio_number] += 1;
         }
     }
     break;
@@ -692,7 +697,8 @@ gpio_ioctlUnlocked(struct file *file, unsigned int cmd, unsigned long arg)
         }
         for(i=0;i<total_chassis_interrupts;i++)
         {
-            g_gpiopinlist[intr_chassis[i].gpio_number] += 1;
+        	if(( intr_sensors[i].gpio_number >=0 ) && ( intr_sensors[i].gpio_number < 256) )
+            	g_gpiopinlist[intr_sensors[i].gpio_number] += 1;
         }
     }
 		break;

@@ -1,0 +1,619 @@
+diff -Naur uboot.old/include/common.h uboot/include/common.h
+--- uboot.old/include/common.h	2020-11-20 17:00:27.000000000 +0800
++++ uboot/include/common.h	2022-01-10 14:12:51.016829878 +0800
+@@ -500,6 +500,12 @@
+ unsigned int rand_r(unsigned int *seedp);
+ 
+ /*
++ * A generic polling function.
++ * This will be called form console_tstc() to poll for various events.
++ */
++void board_poll_devices(void);
++
++/*
+  * STDIO based functions (can always be used)
+  */
+ /* serial stuff */
+diff -Naur uboot.old/arch/arm/mach-aspeed/ast2600/aspeed-espi-ctrl.h uboot/arch/arm/mach-aspeed/ast2600/aspeed-espi-ctrl.h
+--- uboot.old/arch/arm/mach-aspeed/ast2600/aspeed-espi-ctrl.h	1970-01-01 08:00:00.000000000 +0800
++++ uboot/arch/arm/mach-aspeed/ast2600/aspeed-espi-ctrl.h	2022-01-14 15:02:56.785829055 +0800
+@@ -0,0 +1,271 @@
++#include <linux/bitops.h>
++
++/* eSPI register offset */
++#define ESPI_CTRL		0x000
++#define   ESPI_CTRL_OOB_RX_SW_RST	BIT(28)
++#define   ESPI_CTRL_FLASH_TX_DMA_EN	BIT(23)
++#define   ESPI_CTRL_FLASH_RX_DMA_EN	BIT(22)
++#define   ESPI_CTRL_OOB_TX_DMA_EN	BIT(21)
++#define   ESPI_CTRL_OOB_RX_DMA_EN	BIT(20)
++#define   ESPI_CTRL_PERIF_NP_TX_DMA_EN	BIT(19)
++#define   ESPI_CTRL_PERIF_PC_TX_DMA_EN	BIT(17)
++#define   ESPI_CTRL_PERIF_PC_RX_DMA_EN	BIT(16)
++#define   ESPI_CTRL_FLASH_SW_MODE_MASK	GENMASK(11, 10)
++#define   ESPI_CTRL_FLASH_SW_MODE_SHIFT	10
++#define   ESPI_CTRL_PERIF_PC_RX_DMA_EN	BIT(16)
++#define   ESPI_CTRL_FLASH_SW_RDY	BIT(7)
++#define   ESPI_CTRL_OOB_SW_RDY		BIT(4)
++#define   ESPI_CTRL_VW_SW_RDY		BIT(3)
++#define   ESPI_CTRL_PERIF_SW_RDY	BIT(1)
++#define ESPI_STS		0x004
++#define   ESPI_ENG_STS_OOB_RX_BUSY         BIT(20)
++#define ESPI_INT_STS		0x008
++#define   ESPI_INT_STS_HW_RST_DEASSERT		BIT(31)
++#define   ESPI_INT_STS_OOB_RX_TMOUT		BIT(23)
++#define   ESPI_INT_STS_VW_SYSEVT1		BIT(22)
++#define   ESPI_INT_STS_FLASH_TX_ERR		BIT(21)
++#define   ESPI_INT_STS_OOB_TX_ERR		BIT(20)
++#define   ESPI_INT_STS_FLASH_TX_ABT		BIT(19)
++#define   ESPI_INT_STS_OOB_TX_ABT		BIT(18)
++#define   ESPI_INT_STS_PERIF_NP_TX_ABT		BIT(17)
++#define   ESPI_INT_STS_PERIF_PC_TX_ABT		BIT(16)
++#define   ESPI_INT_STS_FLASH_RX_ABT		BIT(15)
++#define   ESPI_INT_STS_OOB_RX_ABT		BIT(14)
++#define   ESPI_INT_STS_PERIF_NP_RX_ABT		BIT(13)
++#define   ESPI_INT_STS_PERIF_PC_RX_ABT		BIT(12)
++#define   ESPI_INT_STS_PERIF_NP_TX_ERR		BIT(11)
++#define   ESPI_INT_STS_PERIF_PC_TX_ERR		BIT(10)
++#define   ESPI_INT_STS_VW_GPIOEVT		BIT(9)
++#define   ESPI_INT_STS_VW_SYSEVT		BIT(8)
++#define   ESPI_INT_STS_FLASH_TX_CMPLT		BIT(7)
++#define   ESPI_INT_STS_FLASH_RX_CMPLT		BIT(6)
++#define   ESPI_INT_STS_OOB_TX_CMPLT		BIT(5)
++#define   ESPI_INT_STS_OOB_RX_CMPLT		BIT(4)
++#define   ESPI_INT_STS_PERIF_NP_TX_CMPLT	BIT(3)
++#define   ESPI_INT_STS_PERIF_PC_TX_CMPLT	BIT(1)
++#define   ESPI_INT_STS_PERIF_PC_RX_CMPLT	BIT(0)
++#define ESPI_INT_EN		0x00c
++#define   ESPI_INT_EN_HW_RST_DEASSERT	BIT(31)
++#define   ESPI_INT_EN_OOB_RX_TMOUT	BIT(23)
++#define   ESPI_INT_EN_VW_SYSEVT1	BIT(22)
++#define   ESPI_INT_EN_FLASH_TX_ERR	BIT(21)
++#define   ESPI_INT_EN_OOB_TX_ERR	BIT(20)
++#define   ESPI_INT_EN_FLASH_TX_ABT	BIT(19)
++#define   ESPI_INT_EN_OOB_TX_ABT	BIT(18)
++#define   ESPI_INT_EN_PERIF_NP_TX_ABT	BIT(17)
++#define   ESPI_INT_EN_PERIF_PC_TX_ABT	BIT(16)
++#define   ESPI_INT_EN_FLASH_RX_ABT	BIT(15)
++#define   ESPI_INT_EN_OOB_RX_ABT	BIT(14)
++#define   ESPI_INT_EN_PERIF_NP_RX_ABT	BIT(13)
++#define   ESPI_INT_EN_PERIF_PC_RX_ABT	BIT(12)
++#define   ESPI_INT_EN_PERIF_NP_TX_ERR	BIT(11)
++#define   ESPI_INT_EN_PERIF_PC_TX_ERR	BIT(10)
++#define   ESPI_INT_EN_VW_GPIOEVT	BIT(9)
++#define   ESPI_INT_EN_VW_SYSEVT		BIT(8)
++#define   ESPI_INT_EN_FLASH_TX_CMPLT	BIT(7)
++#define   ESPI_INT_EN_FLASH_RX_CMPLT	BIT(6)
++#define   ESPI_INT_EN_OOB_TX_CMPLT	BIT(5)
++#define   ESPI_INT_EN_OOB_RX_CMPLT	BIT(4)
++#define   ESPI_INT_EN_PERIF_NP_TX_CMPLT	BIT(3)
++#define   ESPI_INT_EN_PERIF_PC_TX_CMPLT	BIT(1)
++#define   ESPI_INT_EN_PERIF_PC_RX_CMPLT	BIT(0)
++#define ESPI_PERIF_PC_RX_DMA	0x010
++#define ESPI_PERIF_PC_RX_CTRL	0x014
++#define   ESPI_PERIF_PC_RX_CTRL_PEND_SERV	BIT(31)
++#define   ESPI_PERIF_PC_RX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define   ESPI_PERIF_PC_RX_CTRL_LEN_SHIFT	12
++#define   ESPI_PERIF_PC_RX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define   ESPI_PERIF_PC_RX_CTRL_TAG_SHIFT	8
++#define   ESPI_PERIF_PC_RX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define   ESPI_PERIF_PC_RX_CTRL_CYC_SHIFT	0
++#define ESPI_PERIF_PC_RX_PORT	0x018
++#define ESPI_PERIF_PC_TX_DMA	0x020
++#define ESPI_PERIF_PC_TX_CTRL	0x024
++#define	  ESPI_PERIF_PC_TX_CTRL_TRIGGER		BIT(31)
++#define	  ESPI_PERIF_PC_TX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define	  ESPI_PERIF_PC_TX_CTRL_LEN_SHIFT	12
++#define	  ESPI_PERIF_PC_TX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define	  ESPI_PERIF_PC_TX_CTRL_TAG_SHIFT	8
++#define	  ESPI_PERIF_PC_TX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define	  ESPI_PERIF_PC_TX_CTRL_CYC_SHIFT	0
++#define ESPI_PERIF_PC_TX_PORT	0x028
++#define ESPI_PERIF_NP_TX_DMA	0x030
++#define ESPI_PERIF_NP_TX_CTRL	0x034
++#define   ESPI_PERIF_NP_TX_CTRL_TRIGGER		BIT(31)
++#define	  ESPI_PERIF_NP_TX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define	  ESPI_PERIF_NP_TX_CTRL_LEN_SHIFT	12
++#define	  ESPI_PERIF_NP_TX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define	  ESPI_PERIF_NP_TX_CTRL_TAG_SHIFT	8
++#define	  ESPI_PERIF_NP_TX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define	  ESPI_PERIF_NP_TX_CTRL_CYC_SHIFT	0
++#define ESPI_PERIF_NP_TX_PORT	0x038
++#define ESPI_OOB_RX_DMA		0x040
++#define ESPI_OOB_RX_CTRL	0x044
++#define	  ESPI_OOB_RX_CTRL_PEND_SERV	BIT(31)
++#define	  ESPI_OOB_RX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define	  ESPI_OOB_RX_CTRL_LEN_SHIFT	12
++#define	  ESPI_OOB_RX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define	  ESPI_OOB_RX_CTRL_TAG_SHIFT	8
++#define	  ESPI_OOB_RX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define	  ESPI_OOB_RX_CTRL_CYC_SHIFT	0
++#define ESPI_OOB_RX_PORT	0x048
++#define ESPI_OOB_TX_DMA		0x050
++#define ESPI_OOB_TX_CTRL	0x054
++#define	  ESPI_OOB_TX_CTRL_TRIGGER	BIT(31)
++#define	  ESPI_OOB_TX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define	  ESPI_OOB_TX_CTRL_LEN_SHIFT	12
++#define	  ESPI_OOB_TX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define	  ESPI_OOB_TX_CTRL_TAG_SHIFT	8
++#define	  ESPI_OOB_TX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define	  ESPI_OOB_TX_CTRL_CYC_SHIFT	0
++#define ESPI_OOB_TX_PORT	0x058
++#define ESPI_FLASH_RX_DMA	0x060
++#define ESPI_FLASH_RX_CTRL	0x064
++#define	  ESPI_FLASH_RX_CTRL_PEND_SERV	BIT(31)
++#define	  ESPI_FLASH_RX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define	  ESPI_FLASH_RX_CTRL_LEN_SHIFT	12
++#define	  ESPI_FLASH_RX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define	  ESPI_FLASH_RX_CTRL_TAG_SHIFT	8
++#define	  ESPI_FLASH_RX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define	  ESPI_FLASH_RX_CTRL_CYC_SHIFT	0
++#define ESPI_FLASH_RX_PORT	0x068
++#define ESPI_FLASH_TX_DMA	0x070
++#define ESPI_FLASH_TX_CTRL	0x074
++#define	  ESPI_FLASH_TX_CTRL_TRIGGER	BIT(31)
++#define	  ESPI_FLASH_TX_CTRL_LEN_MASK	GENMASK(23, 12)
++#define	  ESPI_FLASH_TX_CTRL_LEN_SHIFT	12
++#define	  ESPI_FLASH_TX_CTRL_TAG_MASK	GENMASK(11, 8)
++#define	  ESPI_FLASH_TX_CTRL_TAG_SHIFT	8
++#define	  ESPI_FLASH_TX_CTRL_CYC_MASK	GENMASK(7, 0)
++#define	  ESPI_FLASH_TX_CTRL_CYC_SHIFT	0
++#define ESPI_FLASH_TX_PORT	0x078
++#define ESPI_CTRL2		0x080
++#define   ESPI_CTRL2_MEMCYC_RD_DIS	BIT(6)
++#define   ESPI_CTRL2_MEMCYC_WR_DIS	BIT(4)
++#define ESPI_PERIF_PC_RX_SADDR	0x084
++#define ESPI_PERIF_PC_RX_TADDR	0x088
++#define ESPI_PERIF_PC_RX_MASK	0x08c
++#define   ESPI_PERIF_PC_RX_MASK_CFG_WP	BIT(0)
++#define ESPI_SYSEVT_INT_EN	0x094
++#define ESPI_SYSEVT		0x098
++#define   ESPI_SYSEVT_HOST_RST_ACK	BIT(27)
++#define   ESPI_SYSEVT_RST_CPU_INIT	BIT(26)
++#define   ESPI_SYSEVT_SLV_BOOT_STS	BIT(23)
++#define   ESPI_SYSEVT_NON_FATAL_ERR	BIT(22)
++#define   ESPI_SYSEVT_FATAL_ERR		BIT(21)
++#define   ESPI_SYSEVT_SLV_BOOT_DONE	BIT(20)
++#define   ESPI_SYSEVT_OOB_RST_ACK	BIT(16)
++#define   ESPI_SYSEVT_NMI_OUT		BIT(10)
++#define   ESPI_SYSEVT_SMI_OUT		BIT(9)
++#define   ESPI_SYSEVT_HOST_RST_WARN	BIT(8)
++#define   ESPI_SYSEVT_OOB_RST_WARN	BIT(6)
++#define   ESPI_SYSEVT_PLTRSTN		BIT(5)
++#define   ESPI_SYSEVT_SUSPEND		BIT(4)
++#define   ESPI_SYSEVT_S5_SLEEP		BIT(2)
++#define   ESPI_SYSEVT_S4_SLEEP		BIT(1)
++#define   ESPI_SYSEVT_S3_SLEEP		BIT(0)
++#define ESPI_VW_GPIO_VAL	0x09c
++#define ESPI_GEN_CAP_N_CONF	0x0a0
++#define ESPI_CH0_CAP_N_CONF	0x0a4
++#define ESPI_CH1_CAP_N_CONF	0x0a8
++#define ESPI_CH2_CAP_N_CONF	0x0ac
++#define ESPI_CH3_CAP_N_CONF	0x0b0
++#define ESPI_CH3_CAP_N_CONF2	0x0b4
++#define ESPI_SYSEVT1_INT_EN	0x100
++#define ESPI_SYSEVT1		0x104
++#define   ESPI_SYSEVT1_SUSPEND_ACK	BIT(20)
++#define   ESPI_SYSEVT1_SUSPEND_WARN	BIT(0)
++#define ESPI_SYSEVT_INT_T0	0x110
++#define ESPI_SYSEVT_INT_T1	0x114
++#define ESPI_SYSEVT_INT_T2	0x118
++#define   ESPI_SYSEVT_INT_T2_HOST_RST_WARN	ESPI_SYSEVT_HOST_RST_WARN
++#define   ESPI_SYSEVT_INT_T2_OOB_RST_WARN	ESPI_SYSEVT_OOB_RST_WARN
++#define ESPI_SYSEVT_INT_STS	0x11c
++#define   ESPI_SYSEVT_INT_STS_NMI_OUT		ESPI_SYSEVT_NMI_OUT
++#define   ESPI_SYSEVT_INT_STS_SMI_OUT		ESPI_SYSEVT_SMI_OUT
++#define   ESPI_SYSEVT_INT_STS_HOST_RST_WARN	ESPI_SYSEVT_HOST_RST_WARN
++#define   ESPI_SYSEVT_INT_STS_OOB_RST_WARN	ESPI_SYSEVT_OOB_RST_WARN
++#define   ESPI_SYSEVT_INT_STS_PLTRSTN		ESPI_SYSEVT_PLTRSTN
++#define   ESPI_SYSEVT_INT_STS_SUSPEND		ESPI_SYSEVT_SUSPEND
++#define   ESPI_SYSEVT_INT_STS_S5_SLEEP		ESPI_SYSEVT_INT_S5_SLEEP
++#define   ESPI_SYSEVT_INT_STS_S4_SLEEP		ESPI_SYSEVT_INT_S4_SLEEP
++#define   ESPI_SYSEVT_INT_STS_S3_SLEEP		ESPI_SYSEVT_INT_S3_SLEEP
++#define ESPI_SYSEVT1_INT_T0	0x120
++#define ESPI_SYSEVT1_INT_T1	0x124
++#define ESPI_SYSEVT1_INT_T2	0x128
++#define ESPI_SYSEVT1_INT_STS	0x12c
++#define   ESPI_SYSEVT1_INT_STS_SUSPEND_WARN	ESPI_SYSEVT1_SUSPEND_WARN
++#define ESPI_OOB_RX_DMA_RB_SIZE	0x130
++#define ESPI_OOB_RX_DMA_RD_PTR	0x134
++#define	  ESPI_OOB_RX_DMA_RD_PTR_UPDATE	BIT(31)
++#define ESPI_OOB_RX_DMA_WS_PTR	0x138
++#define   ESPI_OOB_RX_DMA_WS_PTR_RECV_EN	BIT(31)
++#define   ESPI_OOB_RX_DMA_WS_PTR_SP_MASK	GENMASK(27, 16)
++#define   ESPI_OOB_RX_DMA_WS_PTR_SP_SHIFT	16
++#define   ESPI_OOB_RX_DMA_WS_PTR_WP_MASK	GENMASK(11, 0)
++#define   ESPI_OOB_RX_DMA_WS_PTR_WP_SHIFT	0
++#define ESPI_OOB_TX_DMA_RB_SIZE	0x140
++#define ESPI_OOB_TX_DMA_RD_PTR	0x144
++#define	  ESPI_OOB_TX_DMA_RD_PTR_UPDATE	BIT(31)
++#define ESPI_OOB_TX_DMA_WR_PTR	0x148
++#define	  ESPI_OOB_TX_DMA_WR_PTR_SEND_EN	BIT(31)
++
++/* collect ESPI_INT_STS bits of eSPI channels for convenience */
++#define ESPI_INT_STS_PERIF_BITS			\
++	(ESPI_INT_STS_PERIF_NP_TX_ABT		\
++	| ESPI_INT_STS_PERIF_PC_TX_ABT		\
++	| ESPI_INT_STS_PERIF_NP_RX_ABT		\
++	| ESPI_INT_STS_PERIF_PC_RX_ABT		\
++	| ESPI_INT_STS_PERIF_NP_TX_ERR		\
++	| ESPI_INT_STS_PERIF_PC_TX_ERR		\
++	| ESPI_INT_STS_PERIF_NP_TX_CMPLT	\
++	| ESPI_INT_STS_PERIF_PC_TX_CMPLT	\
++	| ESPI_INT_STS_PERIF_PC_RX_CMPLT)
++#define ESPI_INT_STS_VW_BITS		\
++	(ESPI_INT_STS_VW_SYSEVT1	\
++	| ESPI_INT_STS_VW_GPIOEVT	\
++	| ESPI_INT_STS_VW_SYSEVT)
++#define ESPI_INT_STS_OOB_BITS		\
++	(ESPI_INT_STS_OOB_RX_TMOUT	\
++	| ESPI_INT_STS_OOB_TX_ERR	\
++	| ESPI_INT_STS_OOB_TX_ABT	\
++	| ESPI_INT_STS_OOB_RX_ABT	\
++	| ESPI_INT_STS_OOB_TX_CMPLT	\
++	| ESPI_INT_STS_OOB_RX_CMPLT)
++#define ESPI_INT_STS_FLASH_BITS	\
++	(ESPI_INT_STS_FLASH_TX_ERR	\
++	| ESPI_INT_STS_FLASH_TX_ABT	\
++	| ESPI_INT_STS_FLASH_RX_ABT	\
++	| ESPI_INT_STS_FLASH_TX_CMPLT	\
++	| ESPI_INT_STS_FLASH_RX_CMPLT)
++
++/* collect ESPI_INT_EN bits of eSPI channels for convenience */
++#define ESPI_INT_EN_PERIF_BITS		\
++	(ESPI_INT_EN_PERIF_NP_TX_ABT	\
++	| ESPI_INT_EN_PERIF_PC_TX_ABT	\
++	| ESPI_INT_EN_PERIF_NP_RX_ABT	\
++	| ESPI_INT_EN_PERIF_PC_RX_ABT	\
++	| ESPI_INT_EN_PERIF_NP_TX_ERR	\
++	| ESPI_INT_EN_PERIF_PC_TX_ERR	\
++	| ESPI_INT_EN_PERIF_NP_TX_CMPLT	\
++	| ESPI_INT_EN_PERIF_PC_TX_CMPLT	\
++	| ESPI_INT_EN_PERIF_PC_RX_CMPLT)
++#define ESPI_INT_EN_VW_BITS		\
++	(ESPI_INT_EN_VW_SYSEVT1	\
++	| ESPI_INT_EN_VW_GPIOEVT	\
++	| ESPI_INT_EN_VW_SYSEVT)
++#define ESPI_INT_EN_OOB_BITS		\
++	(ESPI_INT_EN_OOB_RX_TMOUT	\
++	| ESPI_INT_EN_OOB_TX_ERR	\
++	| ESPI_INT_EN_OOB_TX_ABT	\
++	| ESPI_INT_EN_OOB_RX_ABT	\
++	| ESPI_INT_EN_OOB_TX_CMPLT	\
++	| ESPI_INT_EN_OOB_RX_CMPLT)
++#define ESPI_INT_EN_FLASH_BITS		\
++	(ESPI_INT_EN_FLASH_TX_ERR	\
++	| ESPI_INT_EN_FLASH_TX_ABT	\
++	| ESPI_INT_EN_FLASH_RX_ABT	\
++	| ESPI_INT_EN_FLASH_TX_CMPLT	\
++	| ESPI_INT_EN_FLASH_RX_CMPLT)
++
++#define PERIF_MEMCYC_SIZE_MIN   0x10000
+diff -Naur uboot.old/arch/arm/mach-aspeed/ast2600/espi_handshake.c uboot/arch/arm/mach-aspeed/ast2600/espi_handshake.c
+--- uboot.old/arch/arm/mach-aspeed/ast2600/espi_handshake.c	1970-01-01 08:00:00.000000000 +0800
++++ uboot/arch/arm/mach-aspeed/ast2600/espi_handshake.c	2022-01-17 16:16:28.677404389 +0800
+@@ -0,0 +1,296 @@
++#include <common.h>
++#include <dm.h>
++#include <ram.h>
++#include <timer.h>
++#include <asm/io.h>
++#include <asm/arch/timer.h>
++#include <linux/bitops.h>
++#include <linux/err.h>
++#include <dm/uclass.h>
++
++
++#define ESPI_HANDSHAKE_ENABLE        1
++#define ESPI_HANDSHAKE_DEBUG         0
++
++#if ESPI_HANDSHAKE_ENABLE
++
++#include "aspeed-espi-ctrl.h"
++#define AST_ESPI_REG_BASE           0x1E6EE000
++
++#if ESPI_HANDSHAKE_DEBUG
++#define espi_dbg_print(fmt, ...)     printf(fmt, ##__VA_ARGS__)
++#else
++#define espi_dbg_print(fmt, ...)
++#endif
++
++void espi_reg_write(unsigned int offset, unsigned int value)
++{
++	*((volatile unsigned int *) (AST_ESPI_REG_BASE + offset)) = value;
++}
++
++void espi_reg_read(unsigned int offset, unsigned int *value)
++{
++	*value = ( *((volatile unsigned int *)(AST_ESPI_REG_BASE + offset)) );
++}
++
++void espi_reg_update_bits(unsigned int offset, unsigned int mask, unsigned int val)
++{
++	unsigned int tmp,orig;
++
++	espi_reg_read(offset,&orig);
++
++	tmp = orig & ~mask;
++	tmp |= val & mask;
++
++	if (tmp != orig) {
++		espi_reg_write(offset, tmp);
++	}
++}
++
++static inline unsigned int roundup_pow_of_two(unsigned int x)
++{
++	return 1UL << fls(x - 1);
++}
++
++static void aspeed_espi_flash_event(uint32_t sts)
++{
++	if (sts & ESPI_INT_STS_FLASH_RX_CMPLT) {
++		espi_dbg_print("ESPI_INT_STS_FLASH_RX_CMPLT\n");
++	}
++}
++
++static void aspeed_espi_flash_enable(uint32_t safs_mode)
++{
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_FLASH_SW_MODE_MASK,
++			   (safs_mode << ESPI_CTRL_FLASH_SW_MODE_SHIFT));
++
++	espi_reg_write(ESPI_INT_STS,
++		     ESPI_INT_STS_FLASH_BITS);
++
++	espi_reg_update_bits(ESPI_INT_EN,
++			   ESPI_INT_EN_FLASH_BITS,
++			   ESPI_INT_EN_FLASH_BITS);
++
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_FLASH_SW_RDY,
++			   ESPI_CTRL_FLASH_SW_RDY);
++}
++
++static void aspeed_espi_vw_event(uint32_t sts)
++{
++	uint32_t sysevt_sts, tmpsysevt1;
++	
++	espi_reg_read(ESPI_INT_STS, &sts);
++
++	if (sts & ESPI_INT_STS_VW_SYSEVT) {
++		espi_reg_read(ESPI_SYSEVT_INT_STS, &sysevt_sts);
++		espi_dbg_print("ESPI_SYSEVT_INT_STS off:0x%x, val:0x%x\n",ESPI_SYSEVT_INT_STS,sysevt_sts);
++		espi_reg_write(ESPI_SYSEVT_INT_STS, sysevt_sts);
++	}
++
++	if (sts & ESPI_INT_STS_VW_SYSEVT1) {
++		espi_reg_read(ESPI_SYSEVT1_INT_STS, &sysevt_sts);
++		espi_dbg_print("ESPI_SYSEVT1_INT_STS off:0x%x, val:0x%x\n",ESPI_SYSEVT1_INT_STS,sysevt_sts);
++
++		if (sysevt_sts & ESPI_SYSEVT1_INT_STS_SUSPEND_WARN){
++			espi_dbg_print("ESPI_SYSEVT1_INT_STS_SUSPEND_WARN\n");
++			espi_reg_read(ESPI_SYSEVT1, &tmpsysevt1);
++			espi_dbg_print("ESPI_SYSEVT1 Off:0x%x, val:0x%x, \nDo ESPI_SYSEVT1_SUSPEND_ACK\n",ESPI_SYSEVT1,tmpsysevt1);			
++			espi_reg_update_bits(ESPI_SYSEVT1,
++					   ESPI_SYSEVT1_SUSPEND_ACK,
++					   ESPI_SYSEVT1_SUSPEND_ACK);
++		}
++
++		espi_reg_write(ESPI_SYSEVT1_INT_STS, sysevt_sts);
++	}
++}
++
++static void aspeed_espi_vw_enable(void)
++{
++	espi_reg_write(ESPI_INT_STS,
++		     ESPI_INT_STS_VW_BITS);
++
++	espi_reg_update_bits(ESPI_INT_EN,
++			   ESPI_INT_EN_VW_BITS,
++			   ESPI_INT_EN_VW_BITS);
++
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_VW_SW_RDY,
++			   ESPI_CTRL_VW_SW_RDY);
++}
++
++static void aspeed_espi_oob_event(uint32_t sts)
++{
++	uint32_t engine_sts = 0;
++	if (sts & ESPI_INT_STS_OOB_RX_CMPLT) {
++		espi_reg_read(ESPI_STS, &engine_sts);
++		if(engine_sts & ESPI_ENG_STS_OOB_RX_BUSY)
++		{
++			espi_reg_write(ESPI_OOB_RX_CTRL, ESPI_OOB_RX_CTRL_PEND_SERV);
++			espi_dbg_print("Clear OOB Pending and Serviced\n");
++		}
++	}
++}
++
++static void aspeed_espi_oob_enable(void)
++{
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_OOB_SW_RDY | ESPI_CTRL_OOB_RX_SW_RST, 0);
++
++	//We don't use dma allocate memory in uboot stage, so disable DMA reg
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_OOB_TX_DMA_EN | ESPI_CTRL_OOB_RX_DMA_EN, 0);
++
++	espi_reg_write(ESPI_OOB_RX_CTRL, ESPI_OOB_RX_CTRL_PEND_SERV);
++
++	/*
++	 * cleanup OOB RX FIFO to get rid of the data
++	 * of OOB early init side-effect
++	 */
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_OOB_RX_SW_RST, ESPI_CTRL_OOB_RX_SW_RST);
++
++	espi_reg_write(ESPI_OOB_RX_CTRL,
++		     ESPI_OOB_RX_CTRL_PEND_SERV);
++
++	espi_reg_write(ESPI_INT_STS,
++		     ESPI_INT_STS_OOB_BITS);
++
++	espi_reg_update_bits(ESPI_INT_EN,
++			   ESPI_INT_EN_OOB_BITS,
++			   ESPI_INT_EN_OOB_BITS);
++
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_OOB_SW_RDY,
++			   ESPI_CTRL_OOB_SW_RDY);
++}
++
++static void aspeed_espi_perif_event(uint32_t sts)
++{
++	if (sts & ESPI_INT_STS_PERIF_PC_RX_CMPLT) {
++		espi_dbg_print("ESPI_INT_STS_PERIF_PC_RX_CMPLT\n");
++	}
++}
++
++static void aspeed_espi_perif_enable(uint32_t mcyc_mask,uint32_t mcyc_saddr)
++{
++	espi_dbg_print("set mcyc_mask:0x%x\n",mcyc_mask);
++	espi_reg_write(ESPI_PERIF_PC_RX_MASK,
++		     mcyc_mask | ESPI_PERIF_PC_RX_MASK_CFG_WP);
++	espi_reg_update_bits(ESPI_CTRL2,
++			   ESPI_CTRL2_MEMCYC_RD_DIS | ESPI_CTRL2_MEMCYC_WR_DIS, 0);
++
++	espi_reg_write(ESPI_PERIF_PC_RX_SADDR, mcyc_saddr);
++
++	espi_reg_write(ESPI_INT_STS,
++		     ESPI_INT_STS_PERIF_BITS);
++
++	espi_reg_update_bits(ESPI_INT_EN,
++			   ESPI_INT_EN_PERIF_BITS,
++			   ESPI_INT_EN_PERIF_BITS);
++
++	espi_reg_update_bits(ESPI_CTRL,
++			   ESPI_CTRL_PERIF_SW_RDY,
++			   ESPI_CTRL_PERIF_SW_RDY);
++}
++
++//This function will be looped by common/console.c/console_tstc() when user stay at uboot console.
++void board_poll_devices(void)
++{
++	/* aspeed espi interrupt handled in poll function*/
++	uint32_t sts,tmpsts;
++	static int first_init = 1;
++	/* Deinfe in Kernel ArcherCity.dts &espi_ctrl */
++	static uint32_t safs_mode = 0x2;
++	static uint32_t mcyc_saddr = 0x98000000;
++        static uint32_t mcyc_size = 0x10000;
++        static uint32_t mcyc_mask = 0;
++	/**********************************************/
++
++	if(first_init)
++	{
++		if (mcyc_size < PERIF_MEMCYC_SIZE_MIN)
++			mcyc_size = PERIF_MEMCYC_SIZE_MIN;
++		else
++			mcyc_size = roundup_pow_of_two(mcyc_size);
++		mcyc_mask = ~(mcyc_size - 1);
++		first_init = 0;
++	}
++	
++	espi_reg_read(ESPI_INT_STS, &sts);
++	if(!sts)
++		return;
++
++	espi_dbg_print("GET ESPI IRQ:0x%x\n",sts);
++
++	if (sts & ESPI_INT_STS_PERIF_BITS) {
++		espi_dbg_print("PERIPHERAL Handling\n");
++		aspeed_espi_perif_event(sts);
++		espi_reg_write(ESPI_INT_STS, sts & ESPI_INT_STS_PERIF_BITS);
++		espi_reg_read(ESPI_INT_STS, &tmpsts);
++		espi_dbg_print("PERIPHERAL done sts:0x%x\n",tmpsts);
++	}
++
++	if (sts & ESPI_INT_STS_VW_BITS) {
++		espi_dbg_print("VW Handling\n");
++		aspeed_espi_vw_event(sts);
++		espi_reg_write(ESPI_INT_STS, sts & ESPI_INT_STS_VW_BITS);
++		espi_reg_read(ESPI_INT_STS, &tmpsts);
++		espi_dbg_print("VW done sts:0x%x\n",tmpsts);
++	}
++
++	if (sts & (ESPI_INT_STS_OOB_BITS)) {
++		espi_dbg_print("OOB Handling\n");
++		aspeed_espi_oob_event(sts);
++		espi_reg_write(ESPI_INT_STS, sts & ESPI_INT_STS_OOB_BITS);
++		espi_reg_read(ESPI_INT_STS, &tmpsts);
++		espi_dbg_print("OOB done sts:0x%x\n",tmpsts);
++	}
++
++	if (sts & ESPI_INT_STS_FLASH_BITS) {
++		espi_dbg_print("FLASH Handling\n");
++		aspeed_espi_flash_event(sts);
++		espi_reg_write(ESPI_INT_STS, sts & ESPI_INT_STS_FLASH_BITS);
++		espi_reg_read(ESPI_INT_STS, &tmpsts);
++		espi_dbg_print("FLASH done sts:0x%x\n",tmpsts);
++	}
++
++	if (sts & ESPI_INT_STS_HW_RST_DEASSERT) {
++		espi_dbg_print("HW RST DEASSERT Handling\n");
++		aspeed_espi_perif_enable(mcyc_mask,mcyc_saddr);
++		aspeed_espi_vw_enable();
++		aspeed_espi_oob_enable();
++		aspeed_espi_flash_enable(safs_mode);
++
++		espi_reg_write(ESPI_SYSEVT_INT_T0, 0x0);
++		espi_reg_write(ESPI_SYSEVT_INT_T1, 0x0);
++		espi_reg_write(ESPI_SYSEVT_INT_EN, 0xffffffff);
++
++		espi_reg_write(ESPI_SYSEVT1_INT_T0, 0x1);
++		espi_reg_write(ESPI_SYSEVT1_INT_EN, 0x1);
++
++		espi_reg_update_bits(ESPI_INT_EN,
++				   ESPI_INT_EN_HW_RST_DEASSERT,
++				   ESPI_INT_EN_HW_RST_DEASSERT);
++
++
++		espi_reg_update_bits(ESPI_SYSEVT,
++				   ESPI_SYSEVT_SLV_BOOT_STS | ESPI_SYSEVT_SLV_BOOT_DONE,
++				   ESPI_SYSEVT_SLV_BOOT_STS | ESPI_SYSEVT_SLV_BOOT_DONE);
++
++		espi_reg_write(ESPI_INT_STS, ESPI_INT_STS_HW_RST_DEASSERT);
++		espi_reg_read(ESPI_INT_STS, &tmpsts);
++                espi_dbg_print("HW RST DEASSERT done sts:0x%x\n",tmpsts);
++	}
++
++	return;
++}
++
++#else //elif ESPI_HANDSHAKE_ENABLE == 0
++//This function will be looped by common/console.c/console_tstc() when user stay at uboot console.
++void board_poll_devices(void)
++{
++
++}
++#endif
+diff -Naur uboot.old/arch/arm/mach-aspeed/ast2600/Makefile uboot/arch/arm/mach-aspeed/ast2600/Makefile
+--- uboot.old/arch/arm/mach-aspeed/ast2600/Makefile	2020-11-20 17:00:27.000000000 +0800
++++ uboot/arch/arm/mach-aspeed/ast2600/Makefile	2022-01-10 16:29:44.432829878 +0800
+@@ -1,2 +1,2 @@
+-obj-y   += platform.o board_common.o scu_info.o utils.o cache.o crypto.o aspeed_verify.o
++obj-y   += platform.o board_common.o scu_info.o utils.o cache.o crypto.o aspeed_verify.o espi_handshake.o
+ obj-$(CONFIG_SPL_BUILD) += spl.o spl_boot.o
+diff -Naur uboot.old/common/console.c uboot/common/console.c
+--- uboot.old/common/console.c	2020-11-20 17:00:27.000000000 +0800
++++ uboot/common/console.c	2022-01-18 11:51:02.288937157 +0800
+@@ -198,6 +198,8 @@
+ 	struct stdio_dev *dev;
+ 	int prev;
+ 
++	/* Generic polling function */
++	board_poll_devices();
+ 	prev = disable_ctrlc(1);
+ 	for (i = 0; i < cd_count[file]; i++) {
+ 		dev = console_devices[file][i];
+@@ -263,6 +265,8 @@
+ 
+ static inline int console_tstc(int file)
+ {
++	/* Generic polling function */
++	board_poll_devices();
+ 	return stdio_devices[file]->tstc(stdio_devices[file]);
+ }
+ 

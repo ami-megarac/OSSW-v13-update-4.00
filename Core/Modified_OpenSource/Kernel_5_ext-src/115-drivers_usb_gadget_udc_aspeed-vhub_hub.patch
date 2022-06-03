@@ -1,0 +1,156 @@
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/hub.c	2021-12-28 09:13:51.518905126 +0800
++++ linux.new/drivers/usb/gadget/udc/aspeed-vhub/hub.c	2021-12-28 10:25:36.124978611 +0800
+@@ -55,6 +55,9 @@
+ 	AST_VHUB_STR_MANUF = 3,
+ 	AST_VHUB_STR_PRODUCT = 2,
+ 	AST_VHUB_STR_SERIAL = 1,
++	AST_VHUB_STR_INDEX_MAX = 4,
++	AST_VHUB_STR_CONFIG = 5,
++	AST_VHUB_STR_INTERFACE = 6,
+ };
+ 
+ static const struct usb_device_descriptor ast_vhub_dev_desc = {
+@@ -74,6 +77,18 @@
+ 	.bNumConfigurations	= 1,
+ };
+ 
++static const struct usb_qualifier_descriptor ast_vhub_qual_desc = {
++	.bLength = 0xA,
++	.bDescriptorType = USB_DT_DEVICE_QUALIFIER,
++	.bcdUSB = cpu_to_le16(0x0200),
++	.bDeviceClass = USB_CLASS_HUB,
++	.bDeviceSubClass = 0,
++	.bDeviceProtocol = 0,
++	.bMaxPacketSize0 = 64,
++	.bNumConfigurations = 1,
++	.bRESERVED = 0,
++};
++
+ /* Patches to the above when forcing USB1 mode */
+ static void ast_vhub_patch_dev_desc_usb1(struct usb_device_descriptor *desc)
+ {
+@@ -106,7 +121,7 @@
+ 		.wTotalLength		= cpu_to_le16(AST_VHUB_CONF_DESC_SIZE),
+ 		.bNumInterfaces		= 1,
+ 		.bConfigurationValue	= 1,
+-		.iConfiguration		= 0,
++		.iConfiguration		= AST_VHUB_STR_CONFIG,
+ 		.bmAttributes		= USB_CONFIG_ATT_ONE |
+ 					  USB_CONFIG_ATT_SELFPOWER |
+ 					  USB_CONFIG_ATT_WAKEUP,
+@@ -121,12 +136,12 @@
+ 		.bInterfaceClass	= USB_CLASS_HUB,
+ 		.bInterfaceSubClass	= 0,
+ 		.bInterfaceProtocol	= 0,
+-		.iInterface		= 0,
++		.iInterface		= AST_VHUB_STR_INTERFACE,
+ 	},
+ 	.ep = {
+ 		.bLength		= USB_DT_ENDPOINT_SIZE,
+ 		.bDescriptorType	= USB_DT_ENDPOINT,
+-		.bEndpointAddress	= 0x81,
++		.bEndpointAddress	= USB_DIR_IN | 0x01,
+ 		.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 		.wMaxPacketSize		= cpu_to_le16(1),
+ 		.bInterval		= 0x0c,
+@@ -143,8 +158,8 @@
+ 	.bDescLength			= AST_VHUB_HUB_DESC_SIZE,
+ 	.bDescriptorType		= USB_DT_HUB,
+ 	.wHubCharacteristics		= cpu_to_le16(HUB_CHAR_NO_LPSM),
+-	.bPwrOn2PwrGood			= 10,
+-	.bHubContrCurrent		= 0,
++	.bPwrOn2PwrGood			= 0x32,/* 100 ms */
++	.bHubContrCurrent		= 100,/* 100 mA */
+ 	.u.hs.DeviceRemovable[0]	= 0,
+ 	.u.hs.DeviceRemovable[1]	= 0xff,
+ };
+@@ -166,6 +181,14 @@
+ 		.id = AST_VHUB_STR_MANUF,
+ 		.s = "American Megatrends Inc."
+ 	},
++	{
++		.id = AST_VHUB_STR_CONFIG,
++		.s = "Self-powered"
++	},	
++	{
++		.id = AST_VHUB_STR_INTERFACE,
++		.s = "7-port Hub"
++	},
+ 	{ }
+ };
+ 
+@@ -300,9 +323,11 @@
+ 		BUILD_BUG_ON(dsize > sizeof(ast_vhub_dev_desc));
+ 		BUILD_BUG_ON(USB_DT_DEVICE_SIZE >= AST_VHUB_EP0_MAX_PACKET);
+ 		break;
++	case USB_DT_OTHER_SPEED_CONFIG:
+ 	case USB_DT_CONFIG:
+ 		dsize = AST_VHUB_CONF_DESC_SIZE;
+ 		memcpy(ep->buf, &ast_vhub_conf_desc, dsize);
++		((u8 *)ep->buf)[1] = desc_type;
+ 		BUILD_BUG_ON(dsize > sizeof(ast_vhub_conf_desc));
+ 		BUILD_BUG_ON(AST_VHUB_CONF_DESC_SIZE >= AST_VHUB_EP0_MAX_PACKET);
+ 		break;
+@@ -312,6 +337,10 @@
+ 		BUILD_BUG_ON(dsize > sizeof(ast_vhub_hub_desc));
+ 		BUILD_BUG_ON(AST_VHUB_HUB_DESC_SIZE >= AST_VHUB_EP0_MAX_PACKET);
+ 		break;
++	case USB_DT_DEVICE_QUALIFIER:
++		dsize = sizeof(ast_vhub_qual_desc);
++		memcpy(ep->buf, &ast_vhub_qual_desc, dsize);
++		break;
+ 	default:
+ 		return std_req_stall;
+ 	}
+@@ -395,10 +424,9 @@
+ 
+ 		/* GET/SET_CONFIGURATION */
+ 	case DeviceRequest | USB_REQ_GET_CONFIGURATION:
+-		return ast_vhub_simple_reply(ep, 1);
++		return ast_vhub_simple_reply(ep, vhub->current_config);
+ 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:
+-		if (wValue != 1)
+-			return std_req_stall;
++		vhub->current_config = wValue;
+ 		return std_req_complete;
+ 
+ 		/* GET_DESCRIPTOR */
+@@ -406,6 +434,8 @@
+ 		switch (wValue >> 8) {
+ 		case USB_DT_DEVICE:
+ 		case USB_DT_CONFIG:
++		case USB_DT_DEVICE_QUALIFIER:
++		case USB_DT_OTHER_SPEED_CONFIG:
+ 			return ast_vhub_rep_desc(ep, wValue >> 8,
+ 						 wLength);
+ 		case USB_DT_STRING:
+@@ -621,6 +651,9 @@
+ 		ast_vhub_port_reset(vhub, port);
+ 		return std_req_complete;
+ 	case USB_PORT_FEAT_POWER:
++		ast_vhub_change_port_stat(vhub, port,
++					  0, USB_PORT_STAT_POWER,
++					  false);
+ 		/*
+ 		 * On Power-on, we mark the connected flag changed,
+ 		 * if there's a connected device, some hosts will
+@@ -698,9 +731,6 @@
+ 	stat = vhub->ports[port].status;
+ 	chg = vhub->ports[port].change;
+ 
+-	/* We always have power */
+-	stat |= USB_PORT_STAT_POWER;
+-
+ 	EPDBG(ep, " port status=%04x change=%04x\n", stat, chg);
+ 
+ 	return ast_vhub_simple_reply(ep,
+--- linux/drivers/usb/gadget/udc/aspeed-vhub/vhub.h	2021-12-28 09:13:51.434907116 +0800
++++ linux.new/drivers/usb/gadget/udc/aspeed-vhub/vhub.h	2021-12-28 10:25:36.124978611 +0800
+@@ -402,6 +402,7 @@
+ 
+ 	/* Upstream bus speed captured at bus reset */
+ 	unsigned int			speed;
++	u8				current_config;
+ };
+ 
+ /* Standard request handlers result codes */

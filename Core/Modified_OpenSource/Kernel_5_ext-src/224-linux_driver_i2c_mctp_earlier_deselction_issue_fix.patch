@@ -1,0 +1,576 @@
+diff -Naur linux/drivers/i2c/busses/i2c-new-aspeed.c linux_new/drivers/i2c/busses/i2c-new-aspeed.c
+--- linux/drivers/i2c/busses/i2c-new-aspeed.c	2022-05-16 19:27:06.083982267 +0530
++++ linux_new/drivers/i2c/busses/i2c-new-aspeed.c	2022-05-17 12:59:48.378542035 +0530
+@@ -362,8 +362,6 @@
+ };
+ 
+ 
+-extern int i2c_slave_state[MAX_I2C_ADAPTERS] = {0};
+-
+ static u32 aspeed_select_i2c_clock(struct aspeed_new_i2c_bus *i2c_bus)
+ {
+ 	unsigned long base_clk1;
+@@ -544,6 +542,145 @@
+ 		}
+ 	}
+ }
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++
++#define SLAVE_BUF_SIZE 256              // maximum byte count from slave recorded
++#define I2C_CTRL_COUNT 16               // count of I2C controllers inside the BMC
++
++typedef struct
++{
++        u8      SlaveBuf[SLAVE_BUF_SIZE];
++        u16     SlaveMsgLen;
++} i2c_slave_info_t;
++
++static i2c_slave_info_t         gSlaveInfo[I2C_CTRL_COUNT] = {0};
++
++void add_slave_byte(struct aspeed_new_i2c_bus *i2c_bus, unsigned char value)
++{
++        unsigned int busNum = i2c_bus->adap.nr;
++
++        if ( ( busNum >= 0 ) && ( busNum < I2C_CTRL_COUNT ) &&
++             ( gSlaveInfo[busNum].SlaveMsgLen < SLAVE_BUF_SIZE ) )
++        {
++                i2c_slave_info_t        *pBusSlaveInfo = &(gSlaveInfo[busNum]);
++
++                pBusSlaveInfo->SlaveBuf[pBusSlaveInfo->SlaveMsgLen++] = value;
++        }
++}
++
++#define MCTP_PACKET_FIND_ARRAY_SIZE 0x7
++#define MCTP_EOM_FLAG   (1 << 6)        // EOM is bit 6 of MctpFlags
++#define MCTP_CMD_FLAG   (1 << 3)        // CMD(/RSP) is bit 3 of MctpFlags
++
++static void (*mctp_slave_complete_callback)(unsigned int bus) = NULL;
++static void (*mctp_bmc_cmd_callback)(unsigned int bus) = NULL;
++
++typedef struct
++{
++        u8      CommandCode;
++        u8      ByteCount;
++        u8      SrcSlaveAddr;
++        u8      MctpHdrVersion;
++        u8      DestEID;
++        u8      SrcEID;
++        u8      MctpFlags;
++} __attribute__((packed)) mctp_i2c_hdr_t;
++
++typedef struct
++{
++        u64     LastTimeMctpReq;
++        u8      MctpReqPending;
++} i2c_mctp_req_info_t;
++
++typedef enum
++{
++        NO_MCTP_CMD,
++        MCTP_CMD_NO_EOM,
++        MCTP_REQ_EOM,
++        MCTP_RESP_EOM
++} check_mctp_t;
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++void i2c_set_mctp_complete_callback(void (*func)(unsigned int busNum))
++{
++        mctp_slave_complete_callback = func;
++}
++
++void i2c_set_mctp_bmc_cmd_callback(void (*func)(unsigned int busNum))
++{
++        mctp_bmc_cmd_callback = func;
++}
++
++EXPORT_SYMBOL_GPL(i2c_set_mctp_complete_callback);
++EXPORT_SYMBOL_GPL(i2c_set_mctp_bmc_cmd_callback);
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++// Check, if the message belongs to an MCTP command and if it is the last message of the command
++static check_mctp_t check_mctp_cmd(u8 *dataBuf, int receiveLen)
++{
++	mctp_i2c_hdr_t *MctpHdr = NULL;
++	u8 Data[MCTP_PACKET_FIND_ARRAY_SIZE] = {0};
++	u8 index  = 0;
++
++	if((dataBuf != NULL ) && (receiveLen > 0))
++        {       
++                for(index=0; index < MCTP_PACKET_FIND_ARRAY_SIZE; index++)
++                       Data[index] = dataBuf[index];
++		MctpHdr = (mctp_i2c_hdr_t *) Data;
++        
++        	if ( (MctpHdr->CommandCode != 0x0F) && (MctpHdr->MctpHdrVersion != 0x01) )
++		{
++                	// not an MCTP header format
++                	return NO_MCTP_CMD;
++		}
++        	if ( !(MctpHdr->MctpFlags & MCTP_EOM_FLAG) )
++		{
++                	return MCTP_CMD_NO_EOM;
++		}
++        	if ( MctpHdr->MctpFlags & MCTP_CMD_FLAG )
++		{
++	 		return MCTP_REQ_EOM;
++		}
++        	return MCTP_RESP_EOM;
++	}
++
++	return NO_MCTP_CMD;
++}
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++static void check_mctp_response_complete(unsigned int busNum, u8 *dataBuf, int receiveLen)
++{
++        check_mctp_t    retVal;
++
++        retVal = check_mctp_cmd(dataBuf, receiveLen);
++
++        if ( retVal == MCTP_RESP_EOM )
++        {
++                if ( mctp_slave_complete_callback != NULL )
++		        mctp_slave_complete_callback( busNum );
++        }
++}
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++static void i2c_slave_receive(struct aspeed_new_i2c_bus *i2c_bus, int receiveLen)
++{
++        unsigned int	busNum = i2c_bus->adap.nr;
++
++        if (( busNum >= 0 ) && (busNum < I2C_CTRL_COUNT ))
++        {
++                i2c_slave_info_t        *pBusSlaveInfo = &(gSlaveInfo[busNum]);
++
++                check_mctp_response_complete( busNum, pBusSlaveInfo->SlaveBuf, receiveLen );
++		memset(pBusSlaveInfo->SlaveBuf, 0, SLAVE_BUF_SIZE);
++                pBusSlaveInfo->SlaveMsgLen = 0;
++        }
++}
++#endif
++
+ #ifdef CONFIG_I2C_SLAVE
+ static void aspeed_i2c_slave_packet_irq(struct aspeed_new_i2c_bus *i2c_bus, u32 sts)
+ {
+@@ -553,7 +690,6 @@
+ 	u8 value;
+ 	int i = 0;
+ 
+-	i2c_slave_state[i2c_bus->adap.nr] = 0;
+ 	//clear irq fisrt
+ 	writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);
+ 
+@@ -629,6 +765,9 @@
+ 							      AST_I2CS_DMA_LEN_STS));
+ 			dev_dbg(i2c_bus->dev, "rx len %d\n", slave_rx_len);
+ 			for (i = 0; i < slave_rx_len; i++) {
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++				add_slave_byte(i2c_bus, i2c_bus->slave_dma_buf[i]);
++#endif				
+ 				i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED,
+ 						&i2c_bus->slave_dma_buf[i]);
+ 			}
+@@ -641,6 +780,9 @@
+ 			for (i = 0; i < slave_rx_len; i++) {
+ 				value = readb(i2c_bus->buf_base + i);
+ 				dev_dbg(i2c_bus->dev, "[%02x]", value);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++				add_slave_byte(i2c_bus, value);
++#endif
+ 				i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &value);
+ 			}
+ 			writel(AST_I2CC_SET_RX_BUF_LEN(i2c_bus->buf_size),
+@@ -650,12 +792,22 @@
+ 			byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base +
+ 							 AST_I2CC_STS_AND_BUFF));
+ 			dev_dbg(i2c_bus->dev, "[%02x]", byte_data);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++			add_slave_byte(i2c_bus, byte_data);
++#endif
++
+ 			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &byte_data);
+ 		}
+ 		if (sts & AST_I2CS_STOP)
++		{
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++			i2c_slave_receive(i2c_bus, slave_rx_len);
++
++#endif
+ 			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_STOP, &value);
++		}
+ 		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+-		i2c_slave_state[i2c_bus->adap.nr] = I2C_SLAVE_STOP; // To check in channel deselect
++		
+ 		break;
+ 
+ 	/* it is Mw data Mr coming -> it need send tx */
+@@ -678,6 +830,9 @@
+ 							      AST_I2CS_DMA_LEN_STS));
+ 			for (i = 0; i < slave_rx_len; i++) {
+ 				dev_dbg(i2c_bus->dev, "rx [%02x]", i2c_bus->slave_dma_buf[i]);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++			add_slave_byte(i2c_bus, i2c_bus->slave_dma_buf[i]);
++#endif
+ 				i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED,
+ 						&i2c_bus->slave_dma_buf[i]);
+ 			}
+@@ -693,6 +848,9 @@
+ 			for (i = 0; i < slave_rx_len; i++) {
+ 				value = readb(i2c_bus->buf_base + i);
+ 				dev_dbg(i2c_bus->dev, "rx : [%02x]", value);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++				add_slave_byte(i2c_bus, value);
++#endif
+ 				i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &value);
+ 			}
+ 			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_READ_REQUESTED, &value);
+@@ -705,6 +863,9 @@
+ 			byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base +
+ 							 AST_I2CC_STS_AND_BUFF));
+ 			dev_dbg(i2c_bus->dev, "rx : [%02x]", byte_data);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++			add_slave_byte(i2c_bus, byte_data);
++#endif
+ 			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &byte_data);
+ 			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_READ_REQUESTED, &byte_data);
+ 			dev_dbg(i2c_bus->dev, "tx : [%02x]", byte_data);
+@@ -816,6 +977,9 @@
+ 		dev_dbg(i2c_bus->dev, "S : D\n");
+ 		byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 		dev_dbg(i2c_bus->dev, "rx [%x]", byte_data);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++		add_slave_byte(i2c_bus, byte_data);
++#endif
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &byte_data);
+ 		break;
+ 	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_TX_DMA:
+@@ -854,10 +1018,8 @@
+ 	u32 sts = readl(i2c_bus->reg_base + AST_I2CS_ISR);
+ 
+ 	if (!(sts & ier))
+-	{
+-		i2c_slave_state[i2c_bus->adap.nr] = 0;
+ 		return 0;
+-	}
++
+ 	dev_dbg(i2c_bus->dev, "slave irq sts %x sts [%x]\n", sts, readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 
+ 	sts &= ~(AST_I2CS_ADDR_INDICATE_MASK | AST_I2CS_SLAVE_PENDING);
+@@ -889,6 +1051,15 @@
+ 	int xfer_len = 0;
+ 	int i = 0;
+ 	u32 cmd;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++        int busNum = i2c_bus->adap.nr;
++
++	if ( (!(msg->flags & I2C_M_RD)) && (check_mctp_cmd(msg->buf, msg->len) == MCTP_REQ_EOM))
++        {
++                if ( mctp_bmc_cmd_callback != NULL )
++                        mctp_bmc_cmd_callback( busNum );
++        }
++#endif
+ 
+ 	cmd = AST_I2CM_PKT_EN | AST_I2CM_PKT_ADDR(msg->addr) | AST_I2CM_START_CMD;
+ 
+@@ -1758,7 +1929,6 @@
+ };
+ module_platform_driver(aspeed_new_i2c_bus_driver);
+ 
+-EXPORT_SYMBOL(i2c_slave_state);
+ MODULE_AUTHOR("Ryan Chen <ryan_chen@aspeedtech.com>");
+ MODULE_DESCRIPTION("ASPEED I2C New Register Controller Driver");
+ MODULE_LICENSE("GPL v2");
+diff -Naur linux/drivers/i2c/muxes/i2c-mux-pca954x.c linux_new/drivers/i2c/muxes/i2c-mux-pca954x.c
+--- linux/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-05-16 19:27:06.031981865 +0530
++++ linux_new/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-05-17 12:59:33.218446454 +0530
+@@ -87,12 +87,6 @@
+ 	u8 last_chan;           /* last register value */
+ 	/* MUX_IDLE_AS_IS, MUX_IDLE_DISCONNECT or >= 0 for channel */
+ 	s8 idle_state;
+-#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	s8 deselect_timeout;
+-
+-	int doChanDeselect;
+-	wait_queue_head_t chanDeselectWait;
+-#endif
+ 	struct i2c_client *client;
+ 
+ 	struct irq_domain *irq;
+@@ -102,10 +96,21 @@
+ };
+ 
+ #ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-extern int i2c_slave_state[MAX_I2C_ADAPTERS];
++
++#define I2C_CTRL_COUNT  16
++#define DESELECT_TIMEOUT_INITIAL_VAL -1
++
++typedef struct {
++        wait_queue_head_t       waitQueue;
++        int                     condition;
++        int                     mctpCmdPending;
++} deselectWait_t;
++
++static deselectWait_t   deselectWaitList[I2C_CTRL_COUNT] = { 0 };
+ 
+ struct ctrl_sw_chandata {
+ 	u8 channel_mask;
++	s8 deselect_timeout;
+ };
+ #endif
+ 
+@@ -292,9 +297,7 @@
+ 		ret = pca954x_reg_write(muxc->parent, client, regval);
+ 		data->last_chan = ret < 0 ? 0 : regval;
+ 	}
+-#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	data->doChanDeselect = 0;
+-#endif
++
+ 
+ 	return ret;
+ }
+@@ -307,6 +310,7 @@
+ 	bool ctrl_state;
+ 	struct i2c_adapter *root;
+ #ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++        struct ctrl_sw_chandata *sw_chandata = muxc->adapter[chan]->dev.platform_data;
+ 	s8 deselect_timeout;
+ #endif
+ 
+@@ -335,28 +339,35 @@
+ 	}
+ 
+ #ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	deselect_timeout = READ_ONCE(data->deselect_timeout);
+-
+-        if(deselect_timeout > 0 && deselect_timeout <=127)
++	deselect_timeout = sw_chandata->deselect_timeout;
++        
++	if(deselect_timeout > 0 && deselect_timeout <=127)
+         {
+-                 int retry = 2;
+-                 do {
+-                        wait_event_timeout(data->chanDeselectWait, data->doChanDeselect, (msecs_to_jiffies(data->deselect_timeout)));
+-                 } while ((i2c_slave_state[client->adapter->nr] != I2C_SLAVE_STOP) && (retry-- > 0));
+-
+-                 i2c_slave_state[client->adapter->nr] = 0;
+-                 /* Deselect active channel */
+-                 data->last_chan = 0;
+-		 /* update constantly opened channel value */
+-		 data->last_chan |= get_switch_mask(muxc);
+-                 return pca954x_reg_write(muxc->parent, client,
+-                                         data->last_chan);
++		unsigned int busNum = client->adapter->nr;
++		int retry = 2;
+ 
++                if ( (busNum < I2C_CTRL_COUNT) && (READ_ONCE(deselectWaitList[busNum].mctpCmdPending)) )
++                {
++			do {
++                               	wait_event_timeout(deselectWaitList[busNum].waitQueue,
++                                       	READ_ONCE(deselectWaitList[busNum].condition),
++                	                       	(msecs_to_jiffies(deselect_timeout)));
++
++			} while ((READ_ONCE(deselectWaitList[busNum].condition) == 0 ) && (retry-- > 0));
++
++                	WRITE_ONCE(deselectWaitList[busNum].condition, 0);
++                        WRITE_ONCE(deselectWaitList[busNum].mctpCmdPending, 0);
++                }
++
++               	/* Deselect active channel */
++                data->last_chan = 0;
++		/* update constantly opened channel value */
++		data->last_chan |= get_switch_mask(muxc);
++                return pca954x_reg_write(muxc->parent, client, data->last_chan);
+          }
+ #endif
+ 
+ 	/* otherwise leave as-is */
+-
+ 	return 0;
+ }
+ 
+@@ -409,12 +420,12 @@
+                                      struct device_attribute *attr,
+                                      char *buf)
+ {
+-         struct i2c_client *client = to_i2c_client(dev);
+-         struct i2c_mux_core *muxc = i2c_get_clientdata(client);
+-         struct pca954x *data = i2c_mux_priv(muxc);
++        struct ctrl_sw_chandata *ctrl_swChan = dev->platform_data;
+ 
+-         return sprintf(buf, "%d\n", READ_ONCE(data->deselect_timeout));
++        if(ctrl_swChan != NULL)
++                return sprintf(buf, "%d\n", READ_ONCE(ctrl_swChan -> deselect_timeout));
+ 
++        return -EFAULT;
+ }
+ #endif
+ 
+@@ -423,31 +434,25 @@
+                                  struct device_attribute *attr,
+                                  const char *buf, size_t count)
+ {
+-         struct i2c_client *client = to_i2c_client(dev);
+-         struct i2c_mux_core *muxc = i2c_get_clientdata(client);
+-         struct pca954x *data = i2c_mux_priv(muxc);
+-         int val;
+-         int ret;
+-
+-         ret = kstrtoint(buf, 0, &val);
+-         if (ret < 0)
+-                 return ret;
+-
+-         if (val < 0 || val > 127 )
+-                 return -EINVAL;
+-
+-         i2c_lock_bus(muxc->parent, I2C_LOCK_SEGMENT);
++	struct ctrl_sw_chandata *ctrl_swChan = dev->platform_data;
++        struct i2c_adapter *adap = to_i2c_adapter(dev);
++        int val = 0, ret = 0;
+ 
+-         WRITE_ONCE(data->deselect_timeout, val);
++        ret = kstrtoint(buf, 0, &val);
++        if (ret < 0)
++                return ret;
+ 
+-         /*
+-          * Set the mux into a state consistent with the new
+-          * idle_state.
+-          */
++        if (val < 0 || val > 127 )
++                return -EINVAL;
+ 
+-         i2c_unlock_bus(muxc->parent, I2C_LOCK_SEGMENT);
++        if(ctrl_swChan != NULL)
++        {
++                i2c_lock_bus(adap, I2C_LOCK_SEGMENT);
++                WRITE_ONCE(ctrl_swChan -> deselect_timeout, val);
++                i2c_unlock_bus(adap, I2C_LOCK_SEGMENT);
++        }
+ 
+-	 return ret < 0 ? ret : count;
++        return ret < 0 ? ret : count;
+ }
+ #endif
+ 
+@@ -578,11 +583,11 @@
+ 	device_remove_file(&client->dev, &dev_attr_idle_state);
+ 
+ #ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	device_remove_file(&client->dev, &dev_attr_deselect_timeout);
+-	/* Remove the channel mask file */
++	/* Remove the channel mask and deselect file */
+ 	for(num = 0; num < data->chip->nchans; num++)
+ 	{
+-		device_create_file(&muxc->adapter[num]->dev, &dev_attr_channel_mask);
++		device_remove_file(&muxc->adapter[num]->dev, &dev_attr_channel_mask);
++		device_remove_file(&muxc->adapter[num]->dev, &dev_attr_deselect_timeout);
+ 	}
+ #endif
+ 
+@@ -596,6 +601,31 @@
+ 	i2c_mux_del_adapters(muxc);
+ }
+ 
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++extern void i2c_set_mctp_complete_callback(void (*func)(unsigned int bus));
++extern void i2c_set_mctp_bmc_cmd_callback(void (*func)(unsigned int bus));
++
++void i2c_mux_if_handle_mctp_complete(unsigned int bus)
++{
++        if ( bus < I2C_CTRL_COUNT )
++        {
++                WRITE_ONCE(deselectWaitList[bus].condition, 1);
++		WRITE_ONCE(deselectWaitList[bus].mctpCmdPending, 0);
++                wake_up_all( &(deselectWaitList[bus].waitQueue) );
++        }
++}
++
++void i2c_bmc_send_mctp_cmd(unsigned int bus)
++{
++        if ( bus < I2C_CTRL_COUNT )
++        {
++		WRITE_ONCE(deselectWaitList[bus].condition, 0);
++                WRITE_ONCE(deselectWaitList[bus].mctpCmdPending, 1);
++        }
++}
++#endif
++
+ /*
+  * I2C init/probing/exit functions
+  */
+@@ -615,8 +645,14 @@
+ #ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	struct ctrl_sw_chandata *ctrl_swchan;	
+ 	u32 ch_mask = 0;
+-#endif
++        int i = 0;
+ 
++	i2c_set_mctp_bmc_cmd_callback(i2c_bmc_send_mctp_cmd);
++	i2c_set_mctp_complete_callback(i2c_mux_if_handle_mctp_complete);
++        
++	for (i = 0;  i < I2C_CTRL_COUNT;  i++ )
++            init_waitqueue_head( &(deselectWaitList[i].waitQueue) );
++#endif
+ 	if (!i2c_check_functionality(adap, I2C_FUNC_SMBUS_BYTE))
+ 		return -ENODEV;
+ 
+@@ -672,10 +708,7 @@
+ 
+ 	data->last_chan = 0;		   /* force the first selection */
+ 	data->idle_state = MUX_IDLE_AS_IS;
+-#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	data->deselect_timeout = -1;
+-	data->doChanDeselect = 0;
+-#endif
++
+ 
+ 
+ 	idle_disconnect_dt = np &&
+@@ -696,12 +729,19 @@
+ 			goto fail_cleanup;
+ 
+ #ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-		/* Add mask attribute for each channel */
++		/* Add mask and deselect_timeout attribute for each channel */
+ 		ctrl_swchan = kzalloc(sizeof(*ctrl_swchan), GFP_KERNEL);
+ 	    	if (ctrl_swchan == NULL)
+         		return -ENOMEM;
+ 
++		/* now create deselect_timeout for each channels */
+ 		muxc->adapter[num]->dev.platform_data = ctrl_swchan;
++                ret = device_create_file(&muxc->adapter[num]->dev, &dev_attr_deselect_timeout);
++                if (ret)
++			goto fail_cleanup;
++		ctrl_swchan->deselect_timeout = DESELECT_TIMEOUT_INITIAL_VAL;
++
++		/* now create mask for each channels */
+ 		ret = device_create_file(&muxc->adapter[num]->dev, &dev_attr_channel_mask);
+         	if (ret)
+             		goto fail_cleanup;
+@@ -725,18 +765,13 @@
+ 		if (ret)
+ 			goto fail_cleanup;
+ 	}
+-#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	init_waitqueue_head(&(data->chanDeselectWait));
+-#endif
++
+ 
+ 	/*
+ 	 * The attr probably isn't going to be needed in most cases,
+ 	 * so don't fail completely on error.
+ 	 */
+ 	device_create_file(dev, &dev_attr_idle_state);
+-#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+-	device_create_file(dev, &dev_attr_deselect_timeout);
+-#endif
+ 
+ 	dev_info(dev, "registered %d multiplexed busses for I2C %s %s\n",
+ 		 num, data->chip->muxtype == pca954x_ismux

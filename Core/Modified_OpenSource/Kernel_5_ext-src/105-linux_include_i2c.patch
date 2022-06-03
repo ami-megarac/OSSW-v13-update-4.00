@@ -1,0 +1,61 @@
+--- linux/include/linux/i2c.h	2021-10-06 19:20:20.369076010 +0530
++++ linux_new/include/linux/i2c.h	2021-10-07 13:33:06.271808642 +0530
+@@ -1064,7 +1064,58 @@
+ /*               AMI Recovery End                */
+ /**************************************************/
+ 
++#include <linux/i2c-smbus.h>
++enum xfer_mode {
++	BYTE_MODE = 0,
++	BUFF_MODE,
++	DMA_MODE,
+ 
++};
++
++struct aspeed_new_i2c_bus {
++	struct i2c_adapter	adap;
++	struct device		*dev;
++	void __iomem		*reg_base;
++	struct regmap		*global_reg;
++	int					irq;
++	/* 0: dma, 1: pool, 2:byte */
++	enum xfer_mode		mode;
++	/* 0: old mode, 1: new mode */
++	int					clk_div_mode;
++	struct clk			*clk;
++	u32					apb_clk;
++	u32					bus_frequency;
++	/*I2C xfer mode state matchine */
++	u32					state;
++	/* smbus alert */
++	int					alert_enable;
++	struct i2c_smbus_alert_setup alert_data;
++	struct i2c_client *ara;
++	/* Multi-master */
++	bool				multi_master;
++	/* master structure */
++	int					cmd_err;
++	struct completion	cmd_complete;
++	struct i2c_msg		*msgs;	//cur xfer msgs
++	size_t				buf_index;	//buffer mode idx
++	/* cur xfer msgs index*/
++	int					msgs_index;
++	int					msgs_count;	//total msgs
++	dma_addr_t			master_dma_addr;
++	/*total xfer count */
++	int					master_xfer_cnt;
++	/* Buffer mode */
++	void __iomem		*buf_base;
++	size_t				buf_size;
++	/* Slave structure */
++	int					slave_xfer_len;
++	int					slave_xfer_cnt;
++#ifdef CONFIG_I2C_SLAVE
++	unsigned char		*slave_dma_buf;
++	dma_addr_t			slave_dma_addr;
++	struct i2c_client	*slave;
++#endif
++};
+ 
+ 
+ 

@@ -1,0 +1,34 @@
+--- linux-5.4.85/drivers/char/mem.c	2021-04-15 16:07:52.842764553 +0800
++++ linux-5.4.85-new/drivers/char/mem.c	2021-04-19 11:01:45.134094247 +0800
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <linux/mm.h>
++#include <linux/moduleparam.h>
+ #include <linux/miscdevice.h>
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+@@ -994,6 +995,12 @@
+ 	return NULL;
+ }
+ 
++#ifdef CONFIG_DEVMEM_BOOTPARAM
++static bool devmem;
++module_param(devmem, bool, 0444);
++MODULE_PARM_DESC(devmem, "kernel parameter to activate /dev/mem");
++#endif
++
+ static struct class *mem_class;
+ 
+ static int devmem_fs_init_fs_context(struct fs_context *fc)
+@@ -1054,6 +1061,10 @@
+ 		if (!devlist[minor].name)
+ 			continue;
+ 
++#ifdef CONFIG_DEVMEM_BOOTPARAM
++		if (minor == DEVMEM_MINOR && !devmem)
++			continue;
++#endif
+ 		/*
+ 		 * Create /dev/port?
+ 		 */

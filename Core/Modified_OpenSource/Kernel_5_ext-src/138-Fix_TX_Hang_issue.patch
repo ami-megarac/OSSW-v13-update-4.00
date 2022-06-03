@@ -1,0 +1,28 @@
+diff -Naur linux_ori/drivers/net/ethernet/faraday/ftgmac100.c linux/drivers/net/ethernet/faraday/ftgmac100.c
+--- linux_ori/drivers/net/ethernet/faraday/ftgmac100.c	2022-04-20 09:40:53.838178760 +0800
++++ linux/drivers/net/ethernet/faraday/ftgmac100.c	2022-04-20 09:51:33.797581130 +0800
+@@ -2094,11 +2094,7 @@
+ 		if (!IS_ENABLED(CONFIG_NET_NCSI)) {
+ 			dev_err(&pdev->dev, "NCSI stack not enabled\n");
+ 			err = -EINVAL;
+-			goto err_ncsi_dev;
+-			/* Disable ast2600 problematic HW arbitration */
+-			if (of_device_is_compatible(np, "aspeed,ast2600-mac"))
+-				iowrite32(FTGMAC100_TM_DEFAULT,
+-					  priv->base + FTGMAC100_OFFSET_TM);			
++			goto err_ncsi_dev;		
+ 		}
+ 
+ 		dev_info(&pdev->dev, "Using NCSI interface\n");
+@@ -2145,6 +2141,11 @@
+ 		err = ftgmac100_setup_clk(priv);
+ 		if (err)
+ 			goto err_ncsi_dev;
++
++		/* Disable ast2600 problematic HW arbitration */
++		if (of_device_is_compatible(np, "aspeed,ast2600-mac"))
++			iowrite32(FTGMAC100_TM_DEFAULT,
++				  priv->base + FTGMAC100_OFFSET_TM);	
+ 	}
+ 
+ 	/* Default ring sizes */

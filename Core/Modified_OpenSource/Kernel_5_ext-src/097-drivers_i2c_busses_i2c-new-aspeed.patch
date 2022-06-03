@@ -1,0 +1,119 @@
+--- linux/drivers/i2c/busses/i2c-new-aspeed.c	2021-10-06 19:20:20.369076010 +0530
++++ linux_new/drivers/i2c/busses/i2c-new-aspeed.c	2021-10-07 13:49:27.683999227 +0530
+@@ -20,7 +20,6 @@
+ #include <linux/regmap.h>
+ #include <linux/of_device.h>
+ #include <linux/dma-mapping.h>
+-#include <linux/i2c-smbus.h>
+ #include "ast2600-i2c-global.h"
+ 
+ /***************************************************************************/
+@@ -364,56 +363,7 @@
+ 	{ 3072, 0x00000300 | (0x7) | (0xb << 20) | (0xb << 16) | (0xb << 12) },
+ };
+ 
+-enum xfer_mode {
+-	BYTE_MODE = 0,
+-	BUFF_MODE,
+-	DMA_MODE,
+-};
+ 
+-struct aspeed_new_i2c_bus {
+-	struct i2c_adapter	adap;
+-	struct device		*dev;
+-	void __iomem		*reg_base;
+-	struct regmap		*global_reg;
+-	int					irq;
+-	/* 0: dma, 1: pool, 2:byte */
+-	enum xfer_mode		mode;
+-	/* 0: old mode, 1: new mode */
+-	int					clk_div_mode;
+-	struct clk			*clk;
+-	u32					apb_clk;
+-	u32					bus_frequency;
+-	/*I2C xfer mode state matchine */
+-	u32					state;
+-	/* smbus alert */
+-	int					alert_enable;
+-	struct i2c_smbus_alert_setup alert_data;
+-	struct i2c_client *ara;
+-	/* Multi-master */
+-	bool				multi_master;
+-	/* master structure */
+-	int					cmd_err;
+-	struct completion	cmd_complete;
+-	struct i2c_msg		*msgs;	/* cur xfer msgs */
+-	size_t				buf_index;	/* buffer mode idx */
+-	/* cur xfer msgs index*/
+-	int					msgs_index;
+-	int					msgs_count;	/* total msgs */
+-	dma_addr_t			master_dma_addr;
+-	/*total xfer count */
+-	int					master_xfer_cnt;
+-	/* Buffer mode */
+-	void __iomem		*buf_base;
+-	size_t				buf_size;
+-	/* Slave structure */
+-	int					slave_xfer_len;
+-	int					slave_xfer_cnt;
+-#ifdef CONFIG_I2C_SLAVE
+-	unsigned char		*slave_dma_buf;
+-	dma_addr_t			slave_dma_addr;
+-	struct i2c_client	*slave;
+-#endif
+-};
+ 
+ static u32 aspeed_select_i2c_clock(struct aspeed_new_i2c_bus *i2c_bus)
+ {
+@@ -787,8 +737,9 @@
+ static void aspeed_i2c_slave_byte_irq(struct aspeed_new_i2c_bus *i2c_bus, u32 sts)
+ {
+ 	u32 cmd = AST_I2CS_ACTIVE_ALL;
+-	u8 byte_data;
+-	u8 value;
++	u32 ier = 0 ;
++	u8 byte_data = 0;
++	u8 value = 0;
+ 
+ 	switch (sts) {
+ 	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_RX_DMA:
+@@ -809,9 +760,14 @@
+ 		dev_dbg(i2c_bus->dev, "S : Sr|D\n");
+ 		byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 		dev_dbg(i2c_bus->dev, "addr : [%02x]", byte_data);
++		ier = readl(i2c_bus->reg_base + AST_I2CS_IER);
++		ier  &= ~(AST_I2CS_RX_DONE | AST_I2CS_SLAVE_MATCH); 
++		sts &= ~ ( AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_TX_DMA );
++		writel(ier, i2c_bus->reg_base + AST_I2CS_IER);
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_READ_REQUESTED, &byte_data);
+-		dev_dbg(i2c_bus->dev, "tx: [%02x]\n", byte_data);
+-		writel(byte_data, i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
++		//dev_dbg(i2c_bus->dev, "tx: [%02x]\n", byte_data);
++		//writel(byte_data, i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
++		
+ 		break;
+ 	case AST_I2CS_TX_ACK | AST_I2CS_WAIT_TX_DMA:
+ 		cmd |= AST_I2CS_TX_CMD;
+@@ -821,8 +777,21 @@
+ 		writel(byte_data, i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
+ 		break;
+ 	case AST_I2CS_STOP:
++	case AST_I2CS_RX_DONE | AST_I2CS_RX_DONE_NAK | AST_I2CS_STOP:
+ 	case AST_I2CS_STOP | AST_I2CS_TX_NAK:
+-		dev_dbg(i2c_bus->dev, "S : P\n");
++		dev_dbg(i2c_bus->dev, "S : P \n");
++		value = sts ;
++		dev_dbg(i2c_bus->dev, "value=%x \n",value);
++		if(sts & AST_I2CS_RX_DONE)
++		{
++			dev_dbg(i2c_bus->dev, "S : D \n");
++			byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
++			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &byte_data);
++			dev_dbg(i2c_bus->dev, "rx [%x]", byte_data);
++		}
++		if(sts & AST_I2CS_RX_DONE_NAK)
++			dev_dbg(i2c_bus->dev, "rx: NACK\n");
++
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_STOP, &value);
+ 		break;
+ 	default:

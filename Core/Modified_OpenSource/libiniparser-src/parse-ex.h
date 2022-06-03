@@ -42,6 +42,7 @@ void  IniSetStr (INI_HANDLE handle, char *Section, char *Key, char *Val);
 void  IniSetUInt(INI_HANDLE handle, char *Section, char *Key, unsigned long Val);
 void  IniSetSInt(INI_HANDLE handle, char *Section, char *Key, long Val);
 void  IniSetDouble(INI_HANDLE handle, char *Section, char *Key, double Val);
+void  IniSetfloat(INI_HANDLE handle, char *Section, char *Key, float Val);
 void  IniSetBool(INI_HANDLE handle, char *Section, char *Key, int Bool);
 void  IniSetChar(INI_HANDLE handle, char *Section, char *Key, char Val);
 
@@ -49,6 +50,7 @@ char* IniGetStr(INI_HANDLE handle, char *Section, char *Key, char *Def);
 long  IniGetSInt(INI_HANDLE handle, char *Section, char *Key, long  Def);
 unsigned long IniGetUInt(INI_HANDLE handle, char *Section, char *Key, unsigned long  Def);
 double IniGetDouble(INI_HANDLE handle, char *Section, char *Key, double Def);
+float IniGetfloat(INI_HANDLE handle, char *Section, char *Key, float Def);;
 int IniGetBool(INI_HANDLE handle, char *Section, char *Key, int Def);
 char IniGetChar(INI_HANDLE handle, char *Section, char *Key, char Def);
 #endif

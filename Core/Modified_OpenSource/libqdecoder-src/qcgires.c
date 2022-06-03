@@ -118,6 +118,7 @@ bool qcgires_setcookie(qentry_t *request, const char *name, const char *value,
     if (secure == true) {
         strcat(cookie, "; secure");
 	strcat(cookie, ";HttpOnly"); //secure cookies alone with httponly flag set to resolve security issue.
+	strcat(cookie, ";Samesite=Lax");
     }
 
     printf("Set-Cookie: %s\n", cookie);

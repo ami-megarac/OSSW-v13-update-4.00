@@ -1,0 +1,1853 @@
+--- linux-5.4.124/drivers/soc/aspeed/aspeed-bmc-misc.c	2021-10-04 10:45:06.009998194 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/aspeed-bmc-misc.c	2021-09-29 16:56:45.571957800 +0800
+@@ -0,0 +1,190 @@
++// SPDX-License-Identifier: GPL-2.0+
++// Copyright 2018 IBM Corp.
++
++#include <linux/kobject.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/mfd/syscon.h>
++
++#define DEVICE_NAME "aspeed-bmc-misc"
++
++struct aspeed_bmc_ctrl {
++	const char *name;
++	u32 offset;
++	u32 mask;
++	u32 shift;
++	struct regmap *map;
++	struct kobj_attribute attr;
++};
++
++struct aspeed_bmc_misc {
++	struct device *dev;
++	struct regmap *map;
++	struct aspeed_bmc_ctrl *ctrls;
++	int nr_ctrls;
++};
++
++static int aspeed_bmc_misc_parse_dt_child(struct device_node *child,
++					  struct aspeed_bmc_ctrl *ctrl)
++{
++	int rc;
++
++	/* Example child:
++	 *
++	 * ilpc2ahb {
++	 *     offset = <0x80>;
++	 *     bit-mask = <0x1>;
++	 *     bit-shift = <6>;
++	 *     label = "foo";
++	 * }
++	 */
++	if (of_property_read_string(child, "label", &ctrl->name))
++		ctrl->name = child->name;
++
++	rc = of_property_read_u32(child, "offset", &ctrl->offset);
++	if (rc < 0)
++		return rc;
++
++	rc = of_property_read_u32(child, "bit-mask", &ctrl->mask);
++	if (rc < 0)
++		return rc;
++
++	rc = of_property_read_u32(child, "bit-shift", &ctrl->shift);
++	if (rc < 0)
++		return rc;
++
++	ctrl->mask <<= ctrl->shift;
++
++	return 0;
++}
++
++static int aspeed_bmc_misc_parse_dt(struct aspeed_bmc_misc *bmc,
++				    struct device_node *parent)
++{
++	struct aspeed_bmc_ctrl *ctrl;
++	struct device_node *child;
++	int rc;
++
++	bmc->nr_ctrls = of_get_child_count(parent);
++	bmc->ctrls = devm_kcalloc(bmc->dev, bmc->nr_ctrls, sizeof(*bmc->ctrls),
++				  GFP_KERNEL);
++	if (!bmc->ctrls)
++		return -ENOMEM;
++
++	ctrl = bmc->ctrls;
++	for_each_child_of_node(parent, child) {
++		rc = aspeed_bmc_misc_parse_dt_child(child, ctrl++);
++		if (rc < 0) {
++			of_node_put(child);
++			return rc;
++		}
++	}
++
++	return 0;
++}
++
++static ssize_t aspeed_bmc_misc_show(struct kobject *kobj,
++				    struct kobj_attribute *attr, char *buf)
++{
++	struct aspeed_bmc_ctrl *ctrl;
++	unsigned int val;
++	int rc;
++
++	ctrl = container_of(attr, struct aspeed_bmc_ctrl, attr);
++	rc = regmap_read(ctrl->map, ctrl->offset, &val);
++	if (rc)
++		return rc;
++
++	val &= ctrl->mask;
++	val >>= ctrl->shift;
++
++	return sprintf(buf, "%u\n", val);
++}
++
++static ssize_t aspeed_bmc_misc_store(struct kobject *kobj,
++				     struct kobj_attribute *attr,
++				     const char *buf, size_t count)
++{
++	struct aspeed_bmc_ctrl *ctrl;
++	long val;
++	int rc;
++
++	rc = kstrtol(buf, 0, &val);
++	if (rc)
++		return rc;
++
++	ctrl = container_of(attr, struct aspeed_bmc_ctrl, attr);
++	val <<= ctrl->shift;
++	rc = regmap_update_bits(ctrl->map, ctrl->offset, ctrl->mask, val);
++
++	return rc < 0 ? rc : count;
++}
++
++static int aspeed_bmc_misc_add_sysfs_attr(struct aspeed_bmc_misc *bmc,
++					  struct aspeed_bmc_ctrl *ctrl)
++{
++	ctrl->map = bmc->map;
++
++	sysfs_attr_init(&ctrl->attr.attr);
++	ctrl->attr.attr.name = ctrl->name;
++	ctrl->attr.attr.mode = 0664;
++	ctrl->attr.show = aspeed_bmc_misc_show;
++	ctrl->attr.store = aspeed_bmc_misc_store;
++
++	return sysfs_create_file(&bmc->dev->kobj, &ctrl->attr.attr);
++}
++
++static int aspeed_bmc_misc_populate_sysfs(struct aspeed_bmc_misc *bmc)
++{
++	int rc;
++	int i;
++
++	for (i = 0; i < bmc->nr_ctrls; i++) {
++		rc = aspeed_bmc_misc_add_sysfs_attr(bmc, &bmc->ctrls[i]);
++		if (rc < 0)
++			return rc;
++	}
++
++	return 0;
++}
++
++static int aspeed_bmc_misc_probe(struct platform_device *pdev)
++{
++	struct aspeed_bmc_misc *bmc;
++	int rc;
++
++	bmc = devm_kzalloc(&pdev->dev, sizeof(*bmc), GFP_KERNEL);
++	if (!bmc)
++		return -ENOMEM;
++
++	bmc->dev = &pdev->dev;
++	bmc->map = syscon_node_to_regmap(pdev->dev.parent->of_node);
++	if (IS_ERR(bmc->map))
++		return PTR_ERR(bmc->map);
++
++	rc = aspeed_bmc_misc_parse_dt(bmc, pdev->dev.of_node);
++	if (rc < 0)
++		return rc;
++
++	return aspeed_bmc_misc_populate_sysfs(bmc);
++}
++
++static const struct of_device_id aspeed_bmc_misc_match[] = {
++	{ .compatible = "aspeed,bmc-misc" },
++	{ },
++};
++
++static struct platform_driver aspeed_bmc_misc = {
++	.driver = {
++		.name		= DEVICE_NAME,
++		.of_match_table = aspeed_bmc_misc_match,
++	},
++	.probe = aspeed_bmc_misc_probe,
++};
++
++module_platform_driver(aspeed_bmc_misc);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Andrew Jeffery <andrew@aj.id.au>");
+--- linux-5.4.124/drivers/soc/aspeed/aspeed-lpc-ctrl.c	2021-09-30 10:10:32.042370610 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/aspeed-lpc-ctrl.c	2021-10-04 10:16:43.105706514 +0800
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/log2.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/miscdevice.h>
+ #include <linux/mm.h>
+@@ -17,12 +18,15 @@
+ 
+ #define DEVICE_NAME	"aspeed-lpc-ctrl"
+ 
+-#define HICR5 0x0
++#define HICR5 0x80
+ #define HICR5_ENL2H	BIT(8)
+ #define HICR5_ENFWH	BIT(10)
+ 
+-#define HICR7 0x8
+-#define HICR8 0xc
++#define HICR6 0x84
++#define SW_FWH2AHB BIT(17)
++
++#define HICR7 0x88
++#define HICR8 0x8c
+ 
+ struct aspeed_lpc_ctrl {
+ 	struct miscdevice	miscdev;
+@@ -32,6 +36,7 @@
+ 	resource_size_t		mem_size;
+ 	u32		pnor_size;
+ 	u32		pnor_base;
++   bool            fwh2ahb;
+ };
+ 
+ static struct aspeed_lpc_ctrl *file_aspeed_lpc_ctrl(struct file *file)
+@@ -177,6 +182,16 @@
+ 			return rc;
+ 
+ 		/*
++        * Switch to FWH2AHB mode, AST2600 only.
++        *
++        * The other bits in this register are interrupt status bits
++        * that are cleared by writing 1. As we don't want to clear
++        * them, set only the bit of interest.
++        */                                                                                                                                                                                                                                                     
++       if (lpc_ctrl->fwh2ahb)
++           regmap_write(lpc_ctrl->regmap, HICR6, SW_FWH2AHB);
++
++       /*
+ 		 * Enable LPC FHW cycles. This is required for the host to
+ 		 * access the regions specified.
+ 		 */
+@@ -241,6 +256,18 @@
+ 
+ 		lpc_ctrl->mem_size = resource_size(&resm);
+ 		lpc_ctrl->mem_base = resm.start;
++
++       if (!is_power_of_2(lpc_ctrl->mem_size)) {
++           dev_err(dev, "Reserved memory size must be a power of 2, got %zu\n",
++                  lpc_ctrl->mem_size);
++           return -EINVAL;
++       }
++
++       if (!IS_ALIGNED(lpc_ctrl->mem_base, lpc_ctrl->mem_size)) {
++           dev_err(dev, "Reserved memory must be naturally aligned for size %zu\n",
++                  lpc_ctrl->mem_size);
++           return -EINVAL;
++       }
+ 	}
+ 
+ 	lpc_ctrl->regmap = syscon_node_to_regmap(
+@@ -261,6 +288,9 @@
+ 		return rc;
+ 	}
+ 
++   if (of_device_is_compatible(dev->of_node, "aspeed,ast2600-lpc-ctrl"))
++       lpc_ctrl->fwh2ahb = true;
++
+ 	lpc_ctrl->miscdev.minor = MISC_DYNAMIC_MINOR;
+ 	lpc_ctrl->miscdev.name = DEVICE_NAME;
+ 	lpc_ctrl->miscdev.fops = &aspeed_lpc_ctrl_fops;
+@@ -291,6 +321,7 @@
+ static const struct of_device_id aspeed_lpc_ctrl_match[] = {
+ 	{ .compatible = "aspeed,ast2400-lpc-ctrl" },
+ 	{ .compatible = "aspeed,ast2500-lpc-ctrl" },
++   { .compatible = "aspeed,ast2600-lpc-ctrl" },
+ 	{ },
+ };
+ 
+--- linux-5.4.124/drivers/soc/aspeed/aspeed-lpc-snoop.c	2021-09-30 10:10:32.042370610 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/aspeed-lpc-snoop.c	2021-10-06 14:16:19.471873428 +0800
+@@ -23,35 +23,49 @@
+ #include <linux/platform_device.h>
+ #include <linux/poll.h>
+ #include <linux/regmap.h>
++#include <linux/miscdevice.h>
++#include <linux/device.h>
++#include <linux/ioctl.h>
++#include <linux/mm.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
+ 
+-#define DEVICE_NAME	"aspeed-lpc-snoop"
++#define DEVICE_NAME	"snoop0"
++
++#define READ_PREVIOUS_CODES  _IOR('s', 0, int)
++#define READ_CURRENT_CODES   _IOR('s', 1, int)
+ 
+ #define NUM_SNOOP_CHANNELS 2
+ #define SNOOP_FIFO_SIZE 2048
+ 
+-#define HICR5	0x0
++#define HICR2	0x8
++#define HICR2_LRST			BIT(6)
++#define HICR5	0x80
+ #define HICR5_EN_SNP0W		BIT(0)
+ #define HICR5_ENINT_SNP0W	BIT(1)
+ #define HICR5_EN_SNP1W		BIT(2)
+ #define HICR5_ENINT_SNP1W	BIT(3)
+ 
+-#define HICR6	0x4
++#define HICR6	0x84
+ #define HICR6_STR_SNP0W		BIT(0)
+ #define HICR6_STR_SNP1W		BIT(1)
+-#define SNPWADR	0x10
++#define SNPWADR	0x90
+ #define SNPWADR_CH0_MASK	GENMASK(15, 0)
+ #define SNPWADR_CH0_SHIFT	0
+ #define SNPWADR_CH1_MASK	GENMASK(31, 16)
+ #define SNPWADR_CH1_SHIFT	16
+-#define SNPWDR	0x14
++#define SNPWDR	0x94
+ #define SNPWDR_CH0_MASK		GENMASK(7, 0)
+ #define SNPWDR_CH0_SHIFT	0
+ #define SNPWDR_CH1_MASK		GENMASK(15, 8)
+ #define SNPWDR_CH1_SHIFT	8
+-#define HICRB	0x80
++#define HICRB	0x100
+ #define HICRB_ENSNP0D		BIT(14)
+ #define HICRB_ENSNP1D		BIT(15)
+ 
++static atomic_t open_count = ATOMIC_INIT(0);
++struct miscdevice       miscdev;
++
+ struct aspeed_lpc_snoop_model_data {
+ 	/* The ast2400 has bits 14 and 15 as reserved, whereas the ast2500
+ 	 * can use them.
+@@ -61,6 +75,7 @@
+ 
+ struct aspeed_lpc_snoop_channel {
+ 	struct kfifo		fifo;
++	struct kfifo		previous_fifo;
+ 	wait_queue_head_t	wq;
+ 	struct miscdevice	miscdev;
+ };
+@@ -69,7 +84,10 @@
+ 	struct regmap		*regmap;
+ 	int			irq;
+ 	struct clk		*clk;
++	int			gpio_irq;
+ 	struct aspeed_lpc_snoop_channel chan[NUM_SNOOP_CHANNELS];
++	struct platform_device *pdev;
++	struct miscdevice       miscdev;
+ };
+ 
+ static struct aspeed_lpc_snoop_channel *snoop_file_to_chan(struct file *file)
+@@ -120,14 +138,64 @@
+ /* Save a byte to a FIFO and discard the oldest byte if FIFO is full */
+ static void put_fifo_with_discard(struct aspeed_lpc_snoop_channel *chan, u8 val)
+ {
+-	if (!kfifo_initialized(&chan->fifo))
+-		return;
+-	if (kfifo_is_full(&chan->fifo))
+-		kfifo_skip(&chan->fifo);
+-	kfifo_put(&chan->fifo, val);
++	struct kfifo *fifo = &chan->fifo;
++	memcpy (fifo->kfifo.data+fifo->kfifo.in,(void *)&val,1);
++
++	fifo->kfifo.in = (fifo->kfifo.in + 1) % 2048;
++
++	if ( fifo->kfifo.mask == (2048-1))
++	{
++		fifo->kfifo.mask++;
++		fifo->kfifo.out = (fifo->kfifo.out + 1) % 2048;
++	}
++	else if ( fifo->kfifo.mask == 2048)
++		fifo->kfifo.out = (fifo->kfifo.out + 1) % 2048;
++	else
++		fifo->kfifo.mask++;
++
+ 	wake_up_interruptible(&chan->wq);
+ }
+ 
++static void
++snoop_kfifo_get (struct kfifo *fifo, unsigned char *buffer, unsigned int length)
++{
++       unsigned int l;
++       if ( fifo->kfifo.in < fifo->kfifo.out )
++       {
++               l = fifo->kfifo.mask - fifo->kfifo.out;
++               memcpy ( buffer, fifo->kfifo.data + (fifo->kfifo.out - 1)%2048 , l+1 );
++               memcpy ( &buffer[l+1], fifo->kfifo.data, fifo->kfifo.out-1 );
++       }
++       else
++               memcpy ( buffer, fifo->kfifo.data + fifo->kfifo.out, fifo->kfifo.in - fifo->kfifo.out );
++}
++
++static irqreturn_t aspeed_lpc_snoop_reset_irq(int irq, void *arg)
++{
++	struct aspeed_lpc_snoop *lpc_snoop = arg;
++	u32 reg = 0;
++	unsigned int size = 0;
++	
++	if (regmap_read(lpc_snoop->regmap, HICR2, &reg))
++	{
++		return IRQ_NONE;
++	}
++	
++	if (reg & HICR2_LRST) 
++	{
++		size = lpc_snoop->chan[0].fifo.kfifo.mask;
++		snoop_kfifo_get( &lpc_snoop->chan[0].fifo, (unsigned char *)lpc_snoop->chan[0].previous_fifo.kfifo.data, size);
++		lpc_snoop->chan[0].previous_fifo.kfifo.mask = size;
++		lpc_snoop->chan[0].previous_fifo.kfifo.in = size;
++		lpc_snoop->chan[0].previous_fifo.kfifo.out = 0;
++		lpc_snoop->chan[0].fifo.kfifo.mask = 0;
++		lpc_snoop->chan[0].fifo.kfifo.in = 0;
++		lpc_snoop->chan[0].fifo.kfifo.out = 0;
++	}
++	
++	return IRQ_HANDLED;
++}
++
+ static irqreturn_t aspeed_lpc_snoop_irq(int irq, void *arg)
+ {
+ 	struct aspeed_lpc_snoop *lpc_snoop = arg;
+@@ -168,7 +165,7 @@
+ 	int rc;
+ 
+ 	lpc_snoop->irq = platform_get_irq(pdev, 0);
+-	if (!lpc_snoop->irq)
++	if (lpc_snoop->irq < 0)
+ 		return -ENODEV;
+ 
+ 	rc = devm_request_irq(dev, lpc_snoop->irq,
+@@ -198,7 +266,16 @@
+ 			 SNOOP_FIFO_SIZE, GFP_KERNEL);
+ 	if (rc)
+ 		return rc;
+-
++	
++	rc = kfifo_alloc(&lpc_snoop->chan[channel].previous_fifo, SNOOP_FIFO_SIZE, GFP_KERNEL);
++	if (rc)
++	{
++		kfifo_free(&lpc_snoop->chan[channel].fifo);
++		return rc;
++	}
++	
++	lpc_snoop->chan[channel].previous_fifo.kfifo.mask = 0;
++	lpc_snoop->chan[channel].fifo.kfifo.mask = 0;
+ 	lpc_snoop->chan[channel].miscdev.minor = MISC_DYNAMIC_MINOR;
+ 	lpc_snoop->chan[channel].miscdev.name =
+ 		devm_kasprintf(dev, GFP_KERNEL, "%s%d", DEVICE_NAME, channel);
+@@ -254,10 +331,96 @@
+ 		return;
+ 	}
+ 
++	kfifo_free(&lpc_snoop->chan[channel].previous_fifo);
+ 	kfifo_free(&lpc_snoop->chan[channel].fifo);
+ 	misc_deregister(&lpc_snoop->chan[channel].miscdev);
+ }
+ 
++static struct aspeed_lpc_snoop *file_lpc_snoop(struct file *file)
++{
++        return container_of(file->private_data, struct aspeed_lpc_snoop, miscdev);
++}
++
++static long ast_snoop_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++
++       int ret = 0;
++       struct aspeed_lpc_snoop *ast_snoop = file_lpc_snoop(file);
++       unsigned char* buf = (unsigned char*) arg;
++       unsigned char* databuf = NULL;
++       unsigned int size = 0,avail=0;
++
++       databuf = kmalloc(SNOOP_FIFO_SIZE,GFP_KERNEL);
++       if (!databuf)
++       {
++	       return -ENOMEM;
++       }
++
++       switch(cmd)
++       {
++               case READ_PREVIOUS_CODES: 
++                       size =kfifo_len(&ast_snoop->chan[0].previous_fifo);
++                       avail = kfifo_avail(&ast_snoop->chan[0].previous_fifo);
++                       snoop_kfifo_get(&ast_snoop->chan[0].previous_fifo,databuf, size);
++                       if ((ret = copy_to_user( (void*) (buf), (void*) databuf, size )) != 0)
++                       {
++                               printk("READ_PREVIOUS_CODES: Error copying data to user \n");
++                               kfree(databuf);
++                               return ret;
++                       }
++                       break;
++               case READ_CURRENT_CODES:
++                       size =kfifo_len(&ast_snoop->chan[0].fifo);
++                       avail = kfifo_avail(&ast_snoop->chan[0].fifo);
++//                     printk("size - %u\n avail - %u\n",size,avail);
++                       snoop_kfifo_get(&ast_snoop->chan[0].fifo,databuf, size);
++                       if ((ret = copy_to_user( (void*) (buf), (void*) databuf, size )) != 0)
++                       {
++                               printk("READ_CURRENT_CODES: Error copying data to user \n");
++			       kfree(databuf);
++                               return ret;
++                       }
++                       break;
++
++               default:
++                       printk("unrecognized IOCTL call\n");
++		       kfree(databuf);
++                       return -1;
++                       break;
++
++       }
++
++	kfree(databuf);
++       return size;
++}
++
++static int ast_snoop_release(struct inode *inode, struct file *file)
++{
++
++        atomic_dec(&open_count);
++        return 0;
++
++}
++
++static int ast_snoop_open(struct inode *inode, struct file *file)
++{
++
++        if (atomic_inc_return(&open_count) == 1) {
++                return 0;
++        }
++
++        atomic_dec(&open_count);
++        return -EBUSY;
++
++}
++
++static const struct file_operations ast_snoop_fops = {
++        .owner          = THIS_MODULE,
++        .open           = ast_snoop_open,
++        .unlocked_ioctl           = ast_snoop_ioctl,
++        .release        = ast_snoop_release,
++};
++
+ static int aspeed_lpc_snoop_probe(struct platform_device *pdev)
+ {
+ 	struct aspeed_lpc_snoop *lpc_snoop;
+@@ -285,43 +448,48 @@
+ 		dev_err(dev, "no snoop ports configured\n");
+ 		return -ENODEV;
+ 	}
++	else
++		printk(" snoop port configured - %x",port);
+ 
+-	lpc_snoop->clk = devm_clk_get(dev, NULL);
+-	if (IS_ERR(lpc_snoop->clk)) {
+-		rc = PTR_ERR(lpc_snoop->clk);
+-		if (rc != -EPROBE_DEFER)
+-			dev_err(dev, "couldn't get clock\n");
+-		return rc;
+-	}
+-	rc = clk_prepare_enable(lpc_snoop->clk);
++	lpc_snoop->miscdev.minor   = MISC_DYNAMIC_MINOR,
++	lpc_snoop->miscdev.name    = DEVICE_NAME,
++	lpc_snoop->miscdev.fops    = &ast_snoop_fops,
++	lpc_snoop->miscdev.parent = dev;
++
++	rc = misc_register(&lpc_snoop->miscdev);
+ 	if (rc) {
+-		dev_err(dev, "couldn't enable clock\n");
++		dev_err(dev, "Unable to register misc device\n");
+ 		return rc;
+ 	}
+ 
+ 	rc = aspeed_lpc_snoop_config_irq(lpc_snoop, pdev);
+ 	if (rc)
+-		goto err;
++		return rc;
++
++	lpc_snoop->gpio_irq = platform_get_irq(pdev, 1);
++	if (lpc_snoop->gpio_irq > 0)
++	{
++		rc = devm_request_irq(&pdev->dev, lpc_snoop->gpio_irq, aspeed_lpc_snoop_reset_irq, IRQF_SHARED, DEVICE_NAME, lpc_snoop);
++		if (rc) 
++		{
++			printk(" snoop unable to request GPIO IRQ %d\n", lpc_snoop->gpio_irq);
++		}
++	}
+ 
+ 	rc = aspeed_lpc_enable_snoop(lpc_snoop, dev, 0, port);
+ 	if (rc)
+-		goto err;
++		return rc;
+ 
+ 	/* Configuration of 2nd snoop channel port is optional */
+ 	if (of_property_read_u32_index(dev->of_node, "snoop-ports",
+ 				       1, &port) == 0) {
+ 		rc = aspeed_lpc_enable_snoop(lpc_snoop, dev, 1, port);
+-		if (rc) {
++		if (rc)
+ 			aspeed_lpc_disable_snoop(lpc_snoop, 0);
+-			goto err;
+-		}
++		else
++			printk(" snoop port configured - %x",port);
+ 	}
+ 
+-	return 0;
+-
+-err:
+-	clk_disable_unprepare(lpc_snoop->clk);
+-
+ 	return rc;
+ }
+ 
+@@ -333,8 +501,6 @@
+ 	aspeed_lpc_disable_snoop(lpc_snoop, 0);
+ 	aspeed_lpc_disable_snoop(lpc_snoop, 1);
+ 
+-	clk_disable_unprepare(lpc_snoop->clk);
+-
+ 	return 0;
+ }
+ 
+@@ -351,6 +517,8 @@
+ 	  .data = &ast2400_model_data },
+ 	{ .compatible = "aspeed,ast2500-lpc-snoop",
+ 	  .data = &ast2500_model_data },
++	{ .compatible = "aspeed,ast2600-lpc-snoop",
++	  .data = &ast2500_model_data },
+ 	{ },
+ };
+ 
+--- linux-5.4.124/drivers/soc/aspeed/Kconfig	2021-09-30 10:10:32.042370610 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/Kconfig	2021-10-04 13:46:36.382908043 +0800
+@@ -5,6 +5,30 @@
+ 	def_bool y
+ 	depends on ARCH_ASPEED || COMPILE_TEST
+ 
++config ASPEED_BMC_MISC
++	bool "Miscellaneous ASPEED BMC interfaces"
++	depends on ARCH_ASPEED || COMPILE_TEST
++	default ARCH_ASPEED
++	help
++	  Say yes to expose VGA and LPC scratch registers, and other
++	  miscellaneous control interfaces specific to the ASPEED BMC SoCs
++
++config ASPEED_ESPI
++	tristate "Aspeed eSPI Engine Driver"
++	depends on SOC_ASPEED && REGMAP && MFD_SYSCON
++	help
++	  Enable support for the Aspeed eSPI engine. The eSPI engine
++	  plays as a slave device in BMC to communicate with the host
++	  side master over the eSPI interface. The four eSPI channels,
++	  namely peripheral, virtual wire, out-of-band, and flash are
++	  supported.
++
++config ASPEED_ESPI_MMBI
++	tristate "Aspeed eSPI MMBI Driver"
++	depends on ASPEED_ESPI
++	help
++	  Control Aspeed eSPI MMBI driver
++
+ config ASPEED_LPC_CTRL
+ 	depends on SOC_ASPEED && REGMAP && MFD_SYSCON
+ 	tristate "Aspeed ast2400/2500 HOST LPC to BMC bridge control"
+@@ -21,6 +45,21 @@
+ 	  allows the BMC to listen on and save the data written by
+ 	  the host to an arbitrary LPC I/O port.
+ 
++config ASPEED_LPC_PCC
++	tristate "Aspeed Post Code Capture support"
++	depends on SOC_ASPEED && REGMAP && MFD_SYSCON
++	help
++	  Provides a driver to control the LPC PCC interface,
++	  allowing the BMC to snoop data bytes written by the
++	  the host to an arbitrary LPC I/O port.
++
++config ASPEED_LPC_MBOX
++	tristate "Aspeed LPC Mailbox Controller"
++	depends on SOC_ASPEED && REGMAP && MFD_SYSCON
++	help
++	  Expose teh ASPEED LPC MBOX registers found on Aspeed SoCs
++	  to userspace.
++
+ config ASPEED_P2A_CTRL
+ 	depends on SOC_ASPEED && REGMAP && MFD_SYSCON
+ 	tristate "Aspeed ast2400/2500 HOST P2A VGA MMIO to BMC bridge control"
+@@ -29,4 +68,24 @@
+ 	  ioctl()s, the driver also provides an interface for userspace mappings to
+ 	  a pre-defined region.
+ 
++config ASPEED_UDMA
++	tristate "Aspeed UDMA Engine Driver"
++	depends on SOC_ASPEED && REGMAP && MFD_SYSCON && HAS_DMA
++	help
++	  Enable support for the Aspeed UDMA Engine found on the Aspeed AST2XXX
++	  SOCs. The UDMA engine can perform UART DMA operations between the memory
++	  buffer and the UART/VUART devices.
++	  
++config ASPEED_JTAG
++	tristate "ASPEED JTAG Controller"
++	default n
++	help
++	  Driver for JTAG Controller
++
++config ASPEED_MCTP
++        tristate "ASPEED MCTP Driver"
++        default n
++        help
++          Driver for MCTP
++
+ endmenu
+--- linux-5.4.124/drivers/soc/aspeed/Makefile	2021-09-30 10:10:32.042370610 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/Makefile	2021-10-04 13:46:44.511074809 +0800
+@@ -1,4 +1,12 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_ASPEED_BMC_MISC)	+= aspeed-bmc-misc.o
++obj-$(CONFIG_ASPEED_ESPI)	+= aspeed-espi-ctrl.o  aspeed-espi-perif.o aspeed-espi-vw.o aspeed-espi-oob.o aspeed-espi-flash.o
++obj-$(CONFIG_ASPEED_ESPI_MMBI)	+= aspeed-espi-mmbi.o
++obj-$(CONFIG_ASPEED_JTAG)	+= aspeed-jtag.o
++obj-$(CONFIG_ASPEED_MCTP)       += aspeed-mctp.o
+ obj-$(CONFIG_ASPEED_LPC_CTRL)	+= aspeed-lpc-ctrl.o
+ obj-$(CONFIG_ASPEED_LPC_SNOOP)	+= aspeed-lpc-snoop.o
++obj-$(CONFIG_ASPEED_LPC_PCC)	+= aspeed-lpc-pcc.o
++obj-$(CONFIG_ASPEED_LPC_MBOX)	+= aspeed-lpc-mbox.o
++obj-$(CONFIG_ASPEED_UDMA)	+= aspeed-udma.o
+ obj-$(CONFIG_ASPEED_P2A_CTRL)	+= aspeed-p2a-ctrl.o
+--- linux-5.4.124/drivers/soc/aspeed/aspeed-lpc-pcc.c	2021-10-04 10:47:37.065669249 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/aspeed-lpc-pcc.c	2021-09-29 16:56:45.575957500 +0800
+@@ -0,0 +1,637 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) ASPEED Technology Inc.
++ */
++#include <linux/bitops.h>
++#include <linux/interrupt.h>
++#include <linux/fs.h>
++#include <linux/kfifo.h>
++#include <linux/mfd/syscon.h>
++#include <linux/miscdevice.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/poll.h>
++#include <linux/regmap.h>
++#include <linux/dma-mapping.h>
++
++#define DEVICE_NAME "aspeed-lpc-pcc"
++
++#define LHCR5	0x0b4
++#define LHCR6	0x0b8
++#define PCCR6	0x0c4
++#define LHCRA	0x0c8
++#define   LHCRA_PAT_A_LEN_MASK		GENMASK(18, 17)
++#define   LHCRA_PAT_A_LEN_SHIFT		17
++#define   LHCRA_PAT_A_WRITE		BIT(16)
++#define   LHCRA_PAT_A_ADDR_MASK		GENMASK(15, 0)
++#define   LHCRA_PAT_A_ADDR_SHIFT	0
++#define LHCRB	0x0cc
++#define   LHCRB_PAT_B_LEN_MASK		GENMASK(18, 17)
++#define   LHCRB_PAT_B_LEN_SHIFT		17
++#define   LHCRB_PAT_B_WRITE		BIT(16)
++#define   LHCRB_PAT_B_ADDR_MASK		GENMASK(15, 0)
++#define   LHCRB_PAT_B_ADDR_SHIFT	0
++#define PCCR4	0x0d0
++#define PCCR5	0x0d4
++#define PCCR0	0x130
++#define   PCCR0_EN_DMA_INT		BIT(31)
++#define   PCCR0_EN_PAT_B_INT		BIT(23)
++#define   PCCR0_EN_PAT_B		BIT(22)
++#define   PCCR0_EN_PAT_A_INT		BIT(21)
++#define   PCCR0_EN_PAT_A		BIT(20)
++#define   PCCR0_EN_DMA_MODE		BIT(14)
++#define   PCCR0_ADDR_SEL_MASK		GENMASK(13, 12)
++#define   PCCR0_ADDR_SEL_SHIFT		12
++#define   PCCR0_RX_TRIG_LVL_MASK	GENMASK(10, 8)
++#define   PCCR0_RX_TRIG_LVL_SHIFT	8
++#define   PCCR0_CLR_RX_FIFO		BIT(7)
++#define   PCCR0_MODE_SEL_MASK		GENMASK(5, 4)
++#define   PCCR0_MODE_SEL_SHIFT		4
++#define   PCCR0_EN_RX_OVR_INT		BIT(3)
++#define   PCCR0_EN_RX_TMOUT_INT		BIT(2)
++#define   PCCR0_EN_RX_AVAIL_INT		BIT(1)
++#define   PCCR0_EN			BIT(0)
++#define PCCR1	0x134
++#define   PCCR1_BASE_ADDR_MASK		GENMASK(15, 0)
++#define   PCCR1_BASE_ADDR_SHIFT		0
++#define   PCCR1_DONT_CARE_BITS_MASK	GENMASK(21, 16)
++#define   PCCR1_DONT_CARE_BITS_SHIFT	16
++#define PCCR2	0x138
++#define   PCCR2_PAT_B_RST		BIT(17)
++#define   PCCR2_PAT_B_INT		BIT(16)
++#define   PCCR2_PAT_A_RST		BIT(9)
++#define   PCCR2_PAT_A_INT		BIT(8)
++#define   PCCR2_DMA_DONE		BIT(4)
++#define   PCCR2_DATA_RDY		PCCR2_DMA_DONE
++#define   PCCR2_RX_OVR_INT		BIT(3)
++#define   PCCR2_RX_TMOUT_INT		BIT(2)
++#define   PCCR2_RX_AVAIL_INT		BIT(1)
++#define PCCR3	0x13c
++#define   PCCR3_DATA_RDY		BIT(23)
++#define   PCCR3_FIFO_DATA_MASK		GENMASK(7, 0)
++
++#define PCC_DMA_MAX_BUFSZ	(PAGE_SIZE)
++#define PCC_MAX_PATNM		2
++
++enum pcc_fifo_threshold {
++	PCC_FIFO_THR_1_BYTE,
++	PCC_FIFO_THR_1_EIGHTH,
++	PCC_FIFO_THR_2_EIGHTH,
++	PCC_FIFO_THR_3_EIGHTH,
++	PCC_FIFO_THR_4_EIGHTH,
++	PCC_FIFO_THR_5_EIGHTH,
++	PCC_FIFO_THR_6_EIGHTH,
++	PCC_FIFO_THR_7_EIGHTH,
++	PCC_FIFO_THR_8_EIGHTH,
++};
++
++enum pcc_record_mode {
++	PCC_REC_1B,
++	PCC_REC_2B,
++	PCC_REC_4B,
++	PCC_REC_FULL,
++};
++
++enum pcc_port_hbits_select {
++	PCC_PORT_HBITS_SEL_NONE,
++	PCC_PORT_HBITS_SEL_45,
++	PCC_PORT_HBITS_SEL_67,
++	PCC_PORT_HBITS_SEL_89,
++};
++
++struct pcc_pattern {
++	u32 enable;
++	u32 pattern;
++	u32 len;
++	u32 write;
++	u32 port;
++};
++
++struct aspeed_pcc_dma {
++	u32 idx;
++	u32 addr;
++	u8 *virt;
++	u32 size;
++	u32 static_mem;
++	struct tasklet_struct tasklet;
++};
++
++struct aspeed_pcc {
++	struct device *dev;
++	struct regmap *regmap;
++	int irq;
++
++	u32 rec_mode;
++
++	u32 port;
++	u32 port_xbits;
++	u32 port_hbits_select;
++
++	u32 dma_mode;
++	struct aspeed_pcc_dma dma;
++
++	struct pcc_pattern pat_search[PCC_MAX_PATNM];
++
++	struct kfifo fifo;
++	wait_queue_head_t wq;
++
++	struct miscdevice misc_dev;
++};
++
++static inline bool is_pcc_enabled(struct aspeed_pcc *pcc)
++{
++	u32 reg;
++	if (regmap_read(pcc->regmap, PCCR0, &reg))
++		return false;
++	return (reg & PCCR0_EN) ? true : false;
++}
++
++static inline bool is_valid_rec_mode(u32 mode)
++{
++	return (mode > PCC_REC_FULL) ? false : true;
++}
++
++static inline bool is_valid_high_bits_select(u32 select)
++{
++	return (select > PCC_PORT_HBITS_SEL_89) ? false : true;
++}
++
++static ssize_t aspeed_pcc_file_read(struct file *file, char __user *buffer,
++		size_t count, loff_t *ppos)
++{
++	int rc;
++	ssize_t copied;
++
++	struct aspeed_pcc *pcc = container_of(
++			file->private_data,
++			struct aspeed_pcc,
++			misc_dev);
++
++	if (kfifo_is_empty(&pcc->fifo)) {
++		if (file->f_flags & O_NONBLOCK)
++			return -EAGAIN;
++		rc = wait_event_interruptible(pcc->wq,
++				!kfifo_is_empty(&pcc->fifo));
++		if (rc == -ERESTARTSYS)
++			return -EINTR;
++	}
++
++	rc = kfifo_to_user(&pcc->fifo, buffer, count, &copied);
++	return rc ? rc : copied;
++}
++
++static __poll_t aspeed_pcc_file_poll(struct file *file,
++		struct poll_table_struct *pt)
++{
++	struct aspeed_pcc *pcc = container_of(
++			file->private_data,
++			struct aspeed_pcc,
++			misc_dev);
++
++	poll_wait(file, &pcc->wq, pt);
++	return !kfifo_is_empty(&pcc->fifo) ? POLLIN : 0;
++}
++
++static const struct file_operations pcc_fops = {
++	.owner = THIS_MODULE,
++	.read = aspeed_pcc_file_read,
++	.poll = aspeed_pcc_file_poll,
++};
++
++static void aspeed_pcc_dma_tasklet(unsigned long arg)
++{
++	u32 reg;
++	u32 pre_dma_idx;
++	u32 cur_dma_idx;
++	u8 has_data = 0;
++
++	struct aspeed_pcc *pcc = (struct aspeed_pcc*)arg;
++	struct kfifo *fifo = &pcc->fifo;
++
++	if (!kfifo_initialized(fifo))
++		return;
++
++	if (regmap_read(pcc->regmap, PCCR6, &reg))
++		return;
++
++	cur_dma_idx = reg & (PCC_DMA_MAX_BUFSZ - 1);
++	pre_dma_idx = pcc->dma.idx;
++	has_data = (pre_dma_idx == cur_dma_idx) ? false : true;
++
++	do {
++		/* kick the oldest one if full */
++		if (kfifo_is_full(fifo))
++			kfifo_skip(fifo);
++		kfifo_put(fifo, pcc->dma.virt[pre_dma_idx]);
++		pre_dma_idx = (pre_dma_idx + 1) % PCC_DMA_MAX_BUFSZ;
++	} while (pre_dma_idx != cur_dma_idx);
++
++	if (has_data)
++		wake_up_interruptible(&pcc->wq);
++
++	pcc->dma.idx = cur_dma_idx;
++}
++
++static irqreturn_t aspeed_pcc_isr(int irq, void *arg)
++{
++	u32 val;
++	irqreturn_t ret = IRQ_NONE;
++	struct aspeed_pcc *pcc = (struct aspeed_pcc*)arg;
++
++	if (regmap_read(pcc->regmap, PCCR2, &val))
++		return ret;
++
++	if (val & PCCR2_PAT_B_INT) {
++		dev_info(pcc->dev, "pattern search B interrupt\n");
++		regmap_write_bits(pcc->regmap, PCCR2,
++			PCCR2_PAT_B_INT, PCCR2_PAT_B_INT);
++		ret = IRQ_HANDLED;
++	}
++
++	if (val & PCCR2_PAT_A_INT) {
++		dev_info(pcc->dev, "pattern search A interrupt\n");
++		regmap_write_bits(pcc->regmap, PCCR2,
++			PCCR2_PAT_A_INT, PCCR2_PAT_A_INT);
++		ret = IRQ_HANDLED;
++	}
++
++	if (val & PCCR2_RX_OVR_INT) {
++		dev_warn(pcc->dev, "RX FIFO overrun\n");
++		regmap_write_bits(pcc->regmap, PCCR2,
++			PCCR2_RX_OVR_INT, PCCR2_RX_OVR_INT);
++		ret = IRQ_HANDLED;
++	}
++
++	if (val & (PCCR2_DMA_DONE | PCCR2_RX_TMOUT_INT | PCCR2_RX_AVAIL_INT)) {
++		if (pcc->dma_mode) {
++			regmap_write_bits(pcc->regmap, PCCR2,
++					PCCR2_DMA_DONE, PCCR2_DMA_DONE);
++			tasklet_schedule(&pcc->dma.tasklet);
++		}
++		else {
++			do {
++				if (regmap_read(pcc->regmap, PCCR3, &val))
++					break;
++				if (kfifo_is_full(&pcc->fifo))
++					kfifo_skip(&pcc->fifo);
++				kfifo_put(&pcc->fifo, val & PCCR3_FIFO_DATA_MASK);
++
++				if (regmap_read(pcc->regmap, PCCR2, &val))
++					break;
++			} while (val & PCCR2_DATA_RDY);
++
++			wake_up_interruptible(&pcc->wq);
++		}
++		ret = IRQ_HANDLED;
++	}
++
++	return ret;
++}
++
++static void aspeed_pcc_config(struct aspeed_pcc *pcc)
++{
++	struct pcc_pattern* pat_search = pcc->pat_search;
++
++	/* record mode */
++	regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_MODE_SEL_MASK,
++			pcc->rec_mode << PCCR0_MODE_SEL_SHIFT);
++
++	/* port address */
++	regmap_update_bits(pcc->regmap, PCCR1,
++			PCCR1_BASE_ADDR_MASK,
++			pcc->port << PCCR1_BASE_ADDR_SHIFT);
++
++	/* port address high bits selection or parser control */
++	regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_ADDR_SEL_MASK,
++			pcc->port_hbits_select << PCCR0_ADDR_SEL_SHIFT);
++
++	/* port address dont care bits */
++	regmap_update_bits(pcc->regmap, PCCR1,
++			PCCR1_DONT_CARE_BITS_MASK,
++			pcc->port_xbits << PCCR1_DONT_CARE_BITS_SHIFT);
++
++	/* pattern search state reset */
++	regmap_write_bits(pcc->regmap, PCCR2,
++			PCCR2_PAT_B_RST | PCCR2_PAT_A_RST,
++			PCCR2_PAT_B_RST | PCCR2_PAT_A_RST);
++
++	/* pattern A to search */
++	regmap_write(pcc->regmap, LHCR5, pat_search[0].pattern);
++	regmap_update_bits(pcc->regmap, LHCRA,
++			LHCRA_PAT_A_LEN_MASK,
++			(pat_search[0].len - 1) << LHCRA_PAT_A_LEN_SHIFT);
++	regmap_update_bits(pcc->regmap, LHCRA,
++			LHCRA_PAT_A_WRITE,
++			(pat_search[0].write) ? LHCRA_PAT_A_WRITE : 0);
++	regmap_update_bits(pcc->regmap, LHCRA,
++			LHCRA_PAT_A_ADDR_MASK,
++			pat_search[0].port << LHCRA_PAT_A_ADDR_SHIFT);
++	regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_EN_PAT_A_INT | PCCR0_EN_PAT_A,
++			(pat_search[0].enable) ? PCCR0_EN_PAT_A_INT | PCCR0_EN_PAT_A : 0);
++
++	/* pattern B to search */
++	regmap_write(pcc->regmap, LHCR6, pat_search[1].pattern);
++	regmap_update_bits(pcc->regmap, LHCRB,
++			LHCRB_PAT_B_LEN_MASK,
++			(pat_search[1].len - 1) << LHCRB_PAT_B_LEN_SHIFT);
++	regmap_update_bits(pcc->regmap, LHCRB,
++			LHCRB_PAT_B_WRITE,
++			(pat_search[1].write) ? LHCRB_PAT_B_WRITE : 0);
++	regmap_update_bits(pcc->regmap, LHCRB,
++			LHCRB_PAT_B_ADDR_MASK,
++			pat_search[1].port << LHCRB_PAT_B_ADDR_SHIFT);
++	regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_EN_PAT_B_INT | PCCR0_EN_PAT_B,
++			PCCR0_EN_PAT_B_INT | PCCR0_EN_PAT_B);
++	regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_EN_PAT_B_INT | PCCR0_EN_PAT_B,
++			(pat_search[1].enable) ? PCCR0_EN_PAT_B_INT | PCCR0_EN_PAT_B : 0);
++
++	/* DMA address and size (4-bytes unit) */
++	if (pcc->dma_mode) {
++		regmap_write(pcc->regmap, PCCR4, pcc->dma.addr);
++		regmap_write(pcc->regmap, PCCR5, pcc->dma.size / 4);
++	}
++}
++
++static int aspeed_pcc_enable(struct aspeed_pcc *pcc, struct device *dev)
++{
++	int rc;
++
++	if (pcc->dma_mode) {
++		/* map reserved memory or allocate a new one for DMA use */
++		if (pcc->dma.static_mem) {
++			if (pcc->dma.size > PCC_DMA_MAX_BUFSZ) {
++				rc = -EINVAL;
++				goto err_ret;
++			}
++
++			pcc->dma.virt = ioremap(pcc->dma.addr,
++							  pcc->dma.size);
++			if (pcc->dma.virt == NULL) {
++				rc = -ENOMEM;
++				goto err_ret;
++			}
++		}
++		else {
++			pcc->dma.size = PCC_DMA_MAX_BUFSZ;
++			pcc->dma.virt = dma_alloc_coherent(dev,
++					pcc->dma.size,
++					&pcc->dma.addr,
++					GFP_KERNEL);
++			if (pcc->dma.virt == NULL) {
++				rc = -ENOMEM;
++				goto err_ret;
++			}
++		}
++	}
++
++	rc = kfifo_alloc(&pcc->fifo, PAGE_SIZE, GFP_KERNEL);
++	if (rc)
++		goto err_free_dma;
++
++	pcc->misc_dev.parent = dev;
++	pcc->misc_dev.name = devm_kasprintf(dev, GFP_KERNEL, "%s", DEVICE_NAME);
++	pcc->misc_dev.fops = &pcc_fops;
++	rc = misc_register(&pcc->misc_dev);
++	if (rc)
++		goto err_free_kfifo;
++
++	aspeed_pcc_config(pcc);
++
++	/* skip FIFO cleanup if already enabled */
++	if (!is_pcc_enabled(pcc))
++		regmap_write_bits(pcc->regmap, PCCR0,
++				PCCR0_CLR_RX_FIFO, PCCR0_CLR_RX_FIFO);
++
++	if (pcc->dma_mode) {
++		regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_EN_DMA_INT | PCCR0_EN_DMA_MODE,
++			PCCR0_EN_DMA_INT | PCCR0_EN_DMA_MODE);
++	}
++	else {
++		regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_RX_TRIG_LVL_MASK,
++			PCC_FIFO_THR_4_EIGHTH << PCCR0_RX_TRIG_LVL_SHIFT);
++		regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_EN_RX_OVR_INT | PCCR0_EN_RX_TMOUT_INT | PCCR0_EN_RX_AVAIL_INT,
++			PCCR0_EN_RX_OVR_INT | PCCR0_EN_RX_TMOUT_INT | PCCR0_EN_RX_AVAIL_INT);
++	}
++
++	regmap_update_bits(pcc->regmap, PCCR0, PCCR0_EN, PCCR0_EN);
++	return 0;
++
++err_free_kfifo:
++	kfifo_free(&pcc->fifo);
++err_free_dma:
++	if (pcc->dma_mode) {
++		if (pcc->dma.static_mem)
++			iounmap(pcc->dma.virt);
++		else
++			dma_free_coherent(dev, pcc->dma.size,
++					pcc->dma.virt, pcc->dma.addr);
++	}
++err_ret:
++	return rc;
++}
++
++static int aspeed_pcc_disable(struct aspeed_pcc *pcc, struct device *dev)
++{
++	regmap_update_bits(pcc->regmap, PCCR0,
++		PCCR0_EN_DMA_INT
++		| PCCR0_EN_RX_OVR_INT
++		| PCCR0_EN_RX_TMOUT_INT
++		| PCCR0_EN_RX_AVAIL_INT
++		| PCCR0_EN_DMA_MODE
++		| PCCR0_EN,
++		0);
++
++	if (pcc->dma.static_mem)
++		iounmap(pcc->dma.virt);
++	else
++		dma_free_coherent(dev, pcc->dma.size,
++				pcc->dma.virt, pcc->dma.addr);
++
++	misc_deregister(&pcc->misc_dev);
++	kfifo_free(&pcc->fifo);
++
++	return 0;
++}
++
++static int aspeed_pcc_probe(struct platform_device *pdev)
++{
++	int rc;
++
++	struct aspeed_pcc *pcc;
++
++	struct device *dev = &pdev->dev;
++	struct device_node *node;
++
++	struct resource res;
++
++	pcc = devm_kzalloc(&pdev->dev, sizeof(*pcc), GFP_KERNEL);
++	if (!pcc) {
++		dev_err(dev, "failed to allocate memory\n");
++		return -ENOMEM;
++	}
++
++	pcc->regmap = syscon_node_to_regmap(pdev->dev.parent->of_node);
++	if (IS_ERR(pcc->regmap)) {
++		dev_err(dev, "failed to get regmap\n");
++		return -ENODEV;
++	}
++
++	rc = of_property_read_u32(dev->of_node, "port-addr", &pcc->port);
++	if (rc) {
++		dev_err(dev, "failed to get port base address\n");
++		return rc;
++	}
++
++	pcc->dma_mode = of_property_read_bool(dev->of_node, "dma-mode");
++	if (pcc->dma_mode) {
++		/*
++		 * optional, reserved memory for the DMA buffer
++		 * if not specified, the DMA buffer is allocated
++		 * dynamically.
++		 */
++		node = of_parse_phandle(dev->of_node, "memory-region", 0);
++		if (node) {
++			rc = of_address_to_resource(node, 0, &res);
++			if (rc) {
++				dev_err(dev, "failed to get reserved memory region\n");
++				return -ENOMEM;
++			}
++			pcc->dma.addr = res.start;
++			pcc->dma.size = resource_size(&res);
++			pcc->dma.static_mem = 1;
++			of_node_put(node);
++		}
++	}
++
++	/* optional, by default: 0 -> 1-Byte mode */
++	of_property_read_u32(dev->of_node, "rec-mode", &pcc->rec_mode);
++	if (!is_valid_rec_mode(pcc->rec_mode)) {
++		dev_err(dev, "invalid record mode: %u\n",
++				pcc->rec_mode);
++		return -EINVAL;
++	}
++
++	/* optional, by default: 0 -> no don't care bits */
++	of_property_read_u32(dev->of_node, "port-addr-xbits", &pcc->port_xbits);
++
++	/*
++	 * optional, by default: 0 -> no high address bits
++	 *
++	 * Note that when record mode is set to 1-Byte, this
++	 * property is ignored and the corresponding HW bits
++	 * behave as read/write cycle parser control with the
++	 * value set to 0b11
++	 */
++	if (pcc->rec_mode) {
++		of_property_read_u32(dev->of_node, "port-addr-hbits-select", &pcc->port_hbits_select);
++		if (!is_valid_high_bits_select(pcc->port_hbits_select)) {
++			dev_err(dev, "invalid high address bits selection: %u\n",
++				pcc->port_hbits_select);
++			return -EINVAL;
++		}
++	}
++	else
++		pcc->port_hbits_select = 0x3;
++
++	/* optional, pattern search A */
++	if (of_property_read_bool(dev->of_node, "pattern-a-en")) {
++		of_property_read_u32(dev->of_node, "pattern-a", &pcc->pat_search[0].pattern);
++		of_property_read_u32(dev->of_node, "pattern-a-len", &pcc->pat_search[0].len);
++		of_property_read_u32(dev->of_node, "pattern-a-write", &pcc->pat_search[0].write);
++		of_property_read_u32(dev->of_node, "pattern-a-port", &pcc->pat_search[0].port);
++		pcc->pat_search[0].enable = 1;
++	}
++
++	/* optional, pattern search B */
++	if (of_property_read_bool(dev->of_node, "pattern-b-en")) {
++		of_property_read_u32(dev->of_node, "pattern-b", &pcc->pat_search[1].pattern);
++		of_property_read_u32(dev->of_node, "pattern-b-len", &pcc->pat_search[1].len);
++		of_property_read_u32(dev->of_node, "pattern-b-write", &pcc->pat_search[1].write);
++		of_property_read_u32(dev->of_node, "pattern-b-port", &pcc->pat_search[1].port);
++		pcc->pat_search[1].enable = 1;
++	}
++
++	pcc->irq = platform_get_irq(pdev, 0);
++	if (!pcc->irq) {
++		dev_err(dev, "failed to get IRQ\n");
++		return -ENODEV;
++	}
++
++	/*
++	 * as PCC may have been enabled in early stages, we
++	 * need to disable interrupts before requesting IRQ
++	 * to prevent kernel crash
++	 */
++	regmap_update_bits(pcc->regmap, PCCR0,
++			PCCR0_EN_DMA_INT
++			| PCCR0_EN_PAT_A_INT
++			| PCCR0_EN_PAT_B_INT
++			| PCCR0_EN_RX_OVR_INT
++			| PCCR0_EN_RX_TMOUT_INT
++			| PCCR0_EN_RX_AVAIL_INT,
++			0);
++
++	rc = devm_request_irq(dev, pcc->irq, aspeed_pcc_isr,
++			IRQF_SHARED, DEVICE_NAME, pcc);
++	if (rc < 0) {
++		dev_err(dev, "failed to request IRQ handler\n");
++		return rc;
++	}
++
++	tasklet_init(&pcc->dma.tasklet, aspeed_pcc_dma_tasklet,
++			(unsigned long)pcc);
++
++	init_waitqueue_head(&pcc->wq);
++
++	rc = aspeed_pcc_enable(pcc, dev);
++	if (rc) {
++		dev_err(dev, "failed to enable PCC\n");
++		return rc;
++	}
++
++	pcc->dev = dev;
++	dev_set_drvdata(&pdev->dev, pcc);
++
++	dev_info(dev, "module loaded\n");
++
++	return 0;
++}
++
++static int aspeed_pcc_remove(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct aspeed_pcc *pcc = dev_get_drvdata(dev);
++	aspeed_pcc_disable(pcc, dev);
++	return 0;
++}
++
++static const struct of_device_id aspeed_pcc_table[] = {
++	{ .compatible = "aspeed,ast2500-lpc-pcc" },
++	{ .compatible = "aspeed,ast2600-lpc-pcc" },
++};
++
++static struct platform_driver aspeed_pcc_driver = {
++	.driver = {
++		.name = "aspeed-pcc",
++		.of_match_table = aspeed_pcc_table,
++	},
++	.probe = aspeed_pcc_probe,
++	.remove = aspeed_pcc_remove,
++};
++
++module_platform_driver(aspeed_pcc_driver);
++
++MODULE_AUTHOR("Chia-Wei Wang <chiawei_wang@aspeedtech.com>");
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Driver for Aspeed Post Code Capture");
+--- linux-5.4.124/drivers/soc/aspeed/aspeed-udma.c	2021-10-04 10:48:31.289551168 +0800
++++ linux-5.4.124-new/drivers/soc/aspeed/aspeed-udma.c	2021-10-04 14:13:57.672802950 +0800
+@@ -0,0 +1,441 @@
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++#include <linux/dma-mapping.h>
++#include <linux/spinlock.h>
++#include <linux/aspeed-udma.h>
++
++#define DEVICE_NAME "aspeed-udma"
++
++/* UART DMA registers offset */
++#define UDMA_TX_DMA_EN		0x000
++#define UDMA_RX_DMA_EN		0x004
++#define UDMA_TIMEOUT_TIMER	0x00c
++#define UDMA_TX_DMA_RST		0x020
++#define UDMA_RX_DMA_RST		0x024
++#define UDMA_TX_DMA_INT_EN	0x030
++#define UDMA_TX_DMA_INT_STAT	0x034
++#define UDMA_RX_DMA_INT_EN	0x038
++#define UDMA_RX_DMA_INT_STAT	0x03c
++
++#define UDMA_CHX_OFF(x) ((x) * 0x20)
++#define UDMA_CHX_TX_RD_PTR(x)	(0x040 + UDMA_CHX_OFF(x))
++#define UDMA_CHX_TX_WR_PTR(x)	(0x044 + UDMA_CHX_OFF(x))
++#define UDMA_CHX_TX_BUF_BASE(x)	(0x048 + UDMA_CHX_OFF(x))
++#define UDMA_CHX_TX_CTRL(x)	(0x04c + UDMA_CHX_OFF(x))
++#define 	UDMA_TX_CTRL_TMOUT_DISABLE	BIT(4)
++#define 	UDMA_TX_CTRL_BUFSZ_MASK		GENMASK(3, 0)
++#define 	UDMA_TX_CTRL_BUFSZ_SHIFT	0
++#define UDMA_CHX_RX_RD_PTR(x)	(0x050 + UDMA_CHX_OFF(x))
++#define UDMA_CHX_RX_WR_PTR(x)	(0x054 + UDMA_CHX_OFF(x))
++#define UDMA_CHX_RX_BUF_BASE(x)	(0x058 + UDMA_CHX_OFF(x))
++#define UDMA_CHX_RX_CTRL(x)	(0x05c + UDMA_CHX_OFF(x))
++#define 	UDMA_RX_CTRL_TMOUT_DISABLE	BIT(4)
++#define 	UDMA_RX_CTRL_BUFSZ_MASK		GENMASK(3, 0)
++#define 	UDMA_RX_CTRL_BUFSZ_SHIFT	0
++
++#define UDMA_MAX_CHANNEL	14
++#define UDMA_TIMEOUT		0x200
++
++enum aspeed_udma_bufsz_code {
++	UDMA_BUFSZ_CODE_1KB,
++	UDMA_BUFSZ_CODE_4KB,
++	UDMA_BUFSZ_CODE_16KB,
++	UDMA_BUFSZ_CODE_64KB,
++
++	/*
++	 * 128KB and above are supported ONLY for
++	 * virtual UARTs. For physical UARTs, the
++	 * size code is wrapped around at the 64K
++	 * boundary.
++	 */
++	UDMA_BUFSZ_CODE_128KB,
++	UDMA_BUFSZ_CODE_256KB,
++	UDMA_BUFSZ_CODE_512KB,
++	UDMA_BUFSZ_CODE_1024KB,
++	UDMA_BUFSZ_CODE_2048KB,
++	UDMA_BUFSZ_CODE_4096KB,
++	UDMA_BUFSZ_CODE_8192KB,
++	UDMA_BUFSZ_CODE_16384KB,
++};
++
++struct aspeed_udma_chan {
++	dma_addr_t dma_addr;
++
++	struct circ_buf *rb;
++	u32 rb_sz;
++
++	aspeed_udma_cb_t cb;
++	void *cb_arg;
++
++	bool dis_tmout;
++};
++
++struct aspeed_udma {
++	struct device *dev;
++	u8 __iomem *regs;
++	u32 irq;
++	struct aspeed_udma_chan tx_chs[UDMA_MAX_CHANNEL];
++	struct aspeed_udma_chan rx_chs[UDMA_MAX_CHANNEL];
++	spinlock_t lock;
++};
++
++struct aspeed_udma udma[1];
++
++static int aspeed_udma_get_bufsz_code(u32 buf_sz)
++{
++	switch (buf_sz) {
++	case 0x400:
++		return UDMA_BUFSZ_CODE_1KB;
++	case 0x1000:
++		return UDMA_BUFSZ_CODE_4KB;
++	case 0x4000:
++		return UDMA_BUFSZ_CODE_16KB;
++	case 0x10000:
++		return UDMA_BUFSZ_CODE_64KB;
++	case 0x20000:
++		return UDMA_BUFSZ_CODE_128KB;
++	case 0x40000:
++		return UDMA_BUFSZ_CODE_256KB;
++	case 0x80000:
++		return UDMA_BUFSZ_CODE_512KB;
++	case 0x100000:
++		return UDMA_BUFSZ_CODE_1024KB;
++	case 0x200000:
++		return UDMA_BUFSZ_CODE_2048KB;
++	case 0x400000:
++		return UDMA_BUFSZ_CODE_4096KB;
++	case 0x800000:
++		return UDMA_BUFSZ_CODE_8192KB;
++	case 0x1000000:
++		return UDMA_BUFSZ_CODE_16384KB;
++	default:
++		return -1;
++	}
++
++	return -1;
++}
++
++static u32 aspeed_udma_get_tx_rptr(u32 ch_no)
++{
++	return readl(udma->regs + UDMA_CHX_TX_RD_PTR(ch_no));
++}
++
++static u32 aspeed_udma_get_rx_wptr(u32 ch_no)
++{
++	return readl(udma->regs + UDMA_CHX_RX_WR_PTR(ch_no));	
++}
++
++static void aspeed_udma_set_ptr(u32 ch_no, u32 ptr, bool is_tx)
++{
++	writel(ptr, udma->regs +
++			((is_tx) ? 
++			UDMA_CHX_TX_WR_PTR(ch_no) :
++			UDMA_CHX_RX_RD_PTR(ch_no)));
++}
++
++void aspeed_udma_set_tx_wptr(u32 ch_no, u32 wptr)
++{
++	aspeed_udma_set_ptr(ch_no, wptr, true);
++}
++EXPORT_SYMBOL(aspeed_udma_set_tx_wptr);
++
++void aspeed_udma_set_rx_rptr(u32 ch_no, u32 rptr)
++{
++	aspeed_udma_set_ptr(ch_no, rptr, false);
++}
++EXPORT_SYMBOL(aspeed_udma_set_rx_rptr);
++
++static int aspeed_udma_free_chan(u32 ch_no, bool is_tx)
++{
++	u32 reg;
++	unsigned long flags;
++
++	if (ch_no > UDMA_MAX_CHANNEL)
++		return -EINVAL;
++
++	spin_lock_irqsave(&udma->lock, flags);
++
++	reg = readl(udma->regs +
++			((is_tx) ? UDMA_TX_DMA_INT_EN : UDMA_RX_DMA_INT_EN));
++	reg &= ~(0x1 << ch_no);
++
++	writel(reg, udma->regs +
++			((is_tx) ? UDMA_TX_DMA_INT_EN : UDMA_RX_DMA_INT_EN));
++
++	spin_unlock_irqrestore(&udma->lock, flags);
++
++	return 0;
++}
++
++int aspeed_udma_free_tx_chan(u32 ch_no)
++{
++	return aspeed_udma_free_chan(ch_no, true);
++}
++EXPORT_SYMBOL(aspeed_udma_free_tx_chan);
++
++int aspeed_udma_free_rx_chan(u32 ch_no)
++{
++	return aspeed_udma_free_chan(ch_no, false);
++}
++EXPORT_SYMBOL(aspeed_udma_free_rx_chan);
++
++static int aspeed_udma_request_chan(u32 ch_no, dma_addr_t addr,
++		struct circ_buf *rb, u32 rb_sz,
++		aspeed_udma_cb_t cb, void *id, bool dis_tmout, bool is_tx)
++{
++	int retval = 0;
++	int rbsz_code;
++
++	u32 reg;
++	unsigned long flags;
++	struct aspeed_udma_chan *ch;
++
++	if (ch_no > UDMA_MAX_CHANNEL) {
++		retval = -EINVAL;
++		goto out;
++	}
++
++	if (IS_ERR_OR_NULL(rb) || IS_ERR_OR_NULL(rb->buf)) {
++		retval = -EINVAL;
++		goto out;
++	}
++
++	rbsz_code = aspeed_udma_get_bufsz_code(rb_sz);
++	if (rbsz_code < 0) {
++		retval = -EINVAL;
++		goto out;
++	}
++
++	spin_lock_irqsave(&udma->lock, flags);
++
++	if (is_tx) {
++		reg = readl(udma->regs + UDMA_TX_DMA_INT_EN);
++		if (reg & (0x1 << ch_no)) {
++			retval = -EBUSY;
++			goto unlock_n_out;
++		}
++
++		reg |= (0x1 << ch_no);
++		writel(reg, udma->regs + UDMA_TX_DMA_INT_EN);
++
++		reg = readl(udma->regs + UDMA_CHX_TX_CTRL(ch_no));
++		reg |= (dis_tmout) ? UDMA_TX_CTRL_TMOUT_DISABLE : 0;
++		reg |= (rbsz_code << UDMA_TX_CTRL_BUFSZ_SHIFT) & UDMA_TX_CTRL_BUFSZ_MASK;
++		writel(reg, udma->regs + UDMA_CHX_TX_CTRL(ch_no));
++
++		writel(addr, udma->regs + UDMA_CHX_TX_BUF_BASE(ch_no));
++	}
++	else {
++		reg = readl(udma->regs + UDMA_RX_DMA_INT_EN);
++		if (reg & (0x1 << ch_no)) {
++			retval = -EBUSY;
++			goto unlock_n_out;
++		}
++
++		reg |= (0x1 << ch_no);
++		writel(reg, udma->regs + UDMA_RX_DMA_INT_EN);
++
++		reg = readl(udma->regs + UDMA_CHX_RX_CTRL(ch_no));
++		reg |= (dis_tmout) ? UDMA_RX_CTRL_TMOUT_DISABLE : 0;
++		reg |= (rbsz_code << UDMA_RX_CTRL_BUFSZ_SHIFT) & UDMA_RX_CTRL_BUFSZ_MASK;
++		writel(reg, udma->regs + UDMA_CHX_RX_CTRL(ch_no));
++
++		writel(addr, udma->regs + UDMA_CHX_RX_BUF_BASE(ch_no));
++	}
++
++	ch = (is_tx) ? &udma->tx_chs[ch_no] : &udma->rx_chs[ch_no];
++	ch->rb = rb;
++	ch->rb_sz = rb_sz;
++	ch->cb = cb;
++	ch->cb_arg = id;
++	ch->dma_addr = addr;
++	ch->dis_tmout = dis_tmout;
++
++unlock_n_out:
++	spin_unlock_irqrestore(&udma->lock, flags);
++out:
++	return 0;
++}
++
++int aspeed_udma_request_tx_chan(u32 ch_no, dma_addr_t addr,
++		struct circ_buf *rb, u32 rb_sz,
++		aspeed_udma_cb_t cb, void *id, bool dis_tmout)
++{
++	return aspeed_udma_request_chan(ch_no, addr, rb, rb_sz, cb, id,
++									dis_tmout, true);
++}
++EXPORT_SYMBOL(aspeed_udma_request_tx_chan);
++
++int aspeed_udma_request_rx_chan(u32 ch_no, dma_addr_t addr,
++		struct circ_buf *rb, u32 rb_sz,
++		aspeed_udma_cb_t cb, void *id, bool dis_tmout)
++{
++	return aspeed_udma_request_chan(ch_no, addr, rb, rb_sz, cb, id,
++									dis_tmout, false);
++}
++EXPORT_SYMBOL(aspeed_udma_request_rx_chan);
++
++static void aspeed_udma_chan_ctrl(u32 ch_no, u32 op, bool is_tx)
++{
++	unsigned long flags;
++	u32 reg_en, reg_rst;
++	u32 reg_en_off = (is_tx) ? UDMA_TX_DMA_EN : UDMA_RX_DMA_EN;
++	u32 reg_rst_off = (is_tx) ? UDMA_TX_DMA_RST : UDMA_TX_DMA_RST;
++
++	if (ch_no > UDMA_MAX_CHANNEL)
++		return;
++
++	spin_lock_irqsave(&udma->lock, flags);
++
++	reg_en = readl(udma->regs + reg_en_off);
++	reg_rst = readl(udma->regs + reg_rst_off);
++
++	switch (op) {
++	case ASPEED_UDMA_OP_ENABLE:
++		reg_en |= (0x1 << ch_no);
++		writel(reg_en, udma->regs + reg_en_off);
++		break;
++	case ASPEED_UDMA_OP_DISABLE:
++		reg_en &= ~(0x1 << ch_no);
++		writel(reg_en, udma->regs + reg_en_off);
++		break;
++	case ASPEED_UDMA_OP_RESET:
++		reg_en &= ~(0x1 << ch_no);
++		writel(reg_en, udma->regs + reg_en_off);
++		reg_rst |= (0x1 << ch_no);
++		writel(reg_rst, udma->regs + reg_rst_off);
++		reg_rst &= ~(0x1 << ch_no);
++		writel(reg_rst, udma->regs + reg_rst_off);
++		break;
++	default:
++		break;
++	}
++
++	spin_unlock_irqrestore(&udma->lock, flags);
++}
++
++void aspeed_udma_tx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op)
++{
++	aspeed_udma_chan_ctrl(ch_no, op, true);
++}
++EXPORT_SYMBOL(aspeed_udma_tx_chan_ctrl);
++
++void aspeed_udma_rx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op)
++{
++	aspeed_udma_chan_ctrl(ch_no, op, false);
++}
++EXPORT_SYMBOL(aspeed_udma_rx_chan_ctrl);
++
++static irqreturn_t aspeed_udma_isr(int irq, void *arg)
++{
++	u32 bit;
++	unsigned long tx_stat = readl(udma->regs + UDMA_TX_DMA_INT_STAT);
++	unsigned long rx_stat = readl(udma->regs + UDMA_RX_DMA_INT_STAT);
++
++	if (udma != (struct aspeed_udma *)arg)
++		return IRQ_NONE;
++
++	if (tx_stat == 0 && rx_stat == 0)
++		return IRQ_NONE;
++
++	for_each_set_bit(bit, &tx_stat, UDMA_MAX_CHANNEL) {
++		writel((0x1 << bit), udma->regs + UDMA_TX_DMA_INT_STAT);
++		if (udma->tx_chs[bit].cb)
++			udma->tx_chs[bit].cb(aspeed_udma_get_tx_rptr(bit),
++					udma->tx_chs[bit].cb_arg);
++	}
++
++	for_each_set_bit(bit, &rx_stat, UDMA_MAX_CHANNEL) {
++		writel((0x1 << bit), udma->regs + UDMA_RX_DMA_INT_STAT);
++		if (udma->rx_chs[bit].cb)
++			udma->rx_chs[bit].cb(aspeed_udma_get_rx_wptr(bit),
++					udma->rx_chs[bit].cb_arg);
++	}
++
++	return IRQ_HANDLED;
++}
++
++static int aspeed_udma_probe(struct platform_device *pdev)
++{
++	int i, rc;
++	struct resource *res;
++	struct device *dev = &pdev->dev;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (IS_ERR_OR_NULL(res)) {
++		dev_err(dev, "failed to get register base\n");
++		return -ENODEV;
++	}
++
++	udma->regs = devm_ioremap_resource(dev, res);
++	if (IS_ERR_OR_NULL(udma->regs)) {
++		dev_err(dev, "failed to map registers\n");
++		return PTR_ERR(udma->regs);
++	}
++
++	/* disable for safety */
++	writel(0x0, udma->regs + UDMA_TX_DMA_EN);
++	writel(0x0, udma->regs + UDMA_RX_DMA_EN);
++
++	udma->irq = platform_get_irq(pdev, 0);
++	if (udma->irq < 0) {
++		dev_err(dev, "failed to get IRQ number\n");
++		return -ENODEV;
++	}
++
++	rc = devm_request_irq(dev, udma->irq, aspeed_udma_isr,
++			IRQF_SHARED, DEVICE_NAME, udma);
++	if (rc) {
++		dev_err(dev, "failed to request IRQ handler\n");
++		return rc;
++	}
++
++	for (i = 0; i < UDMA_MAX_CHANNEL; ++i) {
++		writel(0, udma->regs + UDMA_CHX_TX_WR_PTR(i));
++		writel(0, udma->regs + UDMA_CHX_RX_RD_PTR(i));
++	}
++
++	writel(0xffffffff, udma->regs + UDMA_TX_DMA_RST);
++	writel(0x0, udma->regs + UDMA_TX_DMA_RST);
++
++	writel(0xffffffff, udma->regs + UDMA_RX_DMA_RST);
++	writel(0x0, udma->regs + UDMA_RX_DMA_RST);
++
++	writel(0x0, udma->regs + UDMA_TX_DMA_INT_EN);
++	writel(0xffffffff, udma->regs + UDMA_TX_DMA_INT_STAT);
++	writel(0x0, udma->regs + UDMA_RX_DMA_INT_EN);
++	writel(0xffffffff, udma->regs + UDMA_RX_DMA_INT_STAT);
++
++	writel(UDMA_TIMEOUT, udma->regs + UDMA_TIMEOUT_TIMER);
++
++	spin_lock_init(&udma->lock);
++
++	dev_set_drvdata(dev, udma);
++
++	return 0;
++}
++
++static const struct of_device_id aspeed_udma_match[] = {
++	{ .compatible = "aspeed,ast2500-udma" },
++	{ .compatible = "aspeed,ast2600-udma" },
++};
++
++static struct platform_driver aspeed_udma_driver = {
++	.driver = {
++		.name = DEVICE_NAME,
++		.of_match_table = aspeed_udma_match,
++
++	},
++	.probe = aspeed_udma_probe,
++};
++
++module_platform_driver(aspeed_udma_driver);
++
++MODULE_AUTHOR("Chia-Wei Wang <chiawei_wang@aspeedtech.com>");
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Aspeed UDMA Engine Driver");
+--- linux-5.4.124/include/linux/aspeed-udma.h	2021-10-04 10:49:13.597459036 +0800
++++ linux-5.4.124-new/include/linux/aspeed-udma.h	2021-09-29 16:56:45.575957500 +0800
+@@ -0,0 +1,30 @@
++#ifndef __ASPEED_UDMA_H__
++#define __ASPEED_UDMA_H__
++
++#include <linux/circ_buf.h>
++
++typedef void (*aspeed_udma_cb_t)(int rb_rwptr, void *id);
++
++enum aspeed_udma_ops {
++	ASPEED_UDMA_OP_ENABLE,
++	ASPEED_UDMA_OP_DISABLE,
++	ASPEED_UDMA_OP_RESET,
++};
++
++void aspeed_udma_set_tx_wptr(u32 ch_no, u32 wptr);
++void aspeed_udma_set_rx_rptr(u32 ch_no, u32 rptr);
++
++void aspeed_udma_tx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op);
++void aspeed_udma_rx_chan_ctrl(u32 ch_no, enum aspeed_udma_ops op);
++
++int aspeed_udma_request_tx_chan(u32 ch_no, dma_addr_t addr,
++				struct circ_buf *rb, u32 rb_sz,
++				aspeed_udma_cb_t cb, void *id, bool en_tmout);
++int aspeed_udma_request_rx_chan(u32 ch_no, dma_addr_t addr,
++				struct circ_buf *rb, u32 rb_sz,
++				aspeed_udma_cb_t cb, void *id, bool en_tmout);
++
++int aspeed_udma_free_tx_chan(u32 ch_no);
++int aspeed_udma_free_rx_chan(u32 ch_no);
++
++#endif

@@ -1,0 +1,125 @@
+diff -Naur linux_org/drivers/net/phy/realtek.c linux/drivers/net/phy/realtek.c
+--- linux_org/drivers/net/phy/realtek.c	2021-07-07 15:42:55.879648994 +0800
++++ linux/drivers/net/phy/realtek.c	2021-07-07 15:42:32.844784594 +0800
+@@ -29,6 +29,8 @@
+ #define RTL8211F_INSR				0x1d
+ 
+ #define RTL8211F_TX_DELAY			BIT(8)
++#define RTL8211F_RX_DELAY			BIT(3)
++
+ #define RTL8211E_TX_DELAY			BIT(1)
+ #define RTL8211E_RX_DELAY			BIT(2)
+ #define RTL8211E_MODE_MII_GMII			BIT(3)
+@@ -172,38 +174,62 @@
+ static int rtl8211f_config_init(struct phy_device *phydev)
+ {
+ 	struct device *dev = &phydev->mdio.dev;
+-	u16 val;
++	u16 val_txdly, val_rxdly;
+ 	int ret;
+ 
+-	/* enable TX-delay for rgmii-{id,txid}, and disable it for rgmii and
+-	 * rgmii-rxid. The RX-delay can be enabled by the external RXDLY pin.
+-	 */
+ 	switch (phydev->interface) {
+ 	case PHY_INTERFACE_MODE_RGMII:
++		val_txdly = 0;
++		val_rxdly = 0;
++		break;
++		
+ 	case PHY_INTERFACE_MODE_RGMII_RXID:
+-		val = 0;
++		val_txdly = 0;
++		val_rxdly = RTL8211F_RX_DELAY;
+ 		break;
+-	case PHY_INTERFACE_MODE_RGMII_ID:
++		
+ 	case PHY_INTERFACE_MODE_RGMII_TXID:
+-		val = RTL8211F_TX_DELAY;
++		val_txdly = RTL8211F_TX_DELAY;
++		val_rxdly = 0;
++		break;
++		
++	case PHY_INTERFACE_MODE_RGMII_ID:
++		val_txdly = RTL8211F_TX_DELAY;
++		val_rxdly = RTL8211F_RX_DELAY;		
+ 		break;
++		
+ 	default: /* the rest of the modes imply leaving delay as is. */
+ 		return 0;
+ 	}
+ 
+ 	ret = phy_modify_paged_changed(phydev, 0xd08, 0x11, RTL8211F_TX_DELAY,
+-				       val);
++				       val_txdly);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to update the TX delay register\n");
+ 		return ret;
+ 	} else if (ret) {
+ 		dev_dbg(dev,
+ 			"%s 2ns TX delay (and changing the value from pin-strapping RXD1 or the bootloader)\n",
+-			val ? "Enabling" : "Disabling");
++			val_txdly  ? "Enabling" : "Disabling");
+ 	} else {
+ 		dev_dbg(dev,
+ 			"2ns TX delay was already %s (by pin-strapping RXD1 or bootloader configuration)\n",
+-			val ? "enabled" : "disabled");
++			val_txdly ? "enabled" : "disabled");
++	}
++
++	ret = phy_modify_paged_changed(phydev, 0xd08, 0x15, RTL8211F_RX_DELAY,
++				       val_rxdly);
++	if (ret < 0) {
++		dev_err(dev, "Failed to update the RX delay register\n");
++		return ret;
++	} else if (ret) {
++		dev_dbg(dev,
++			"%s 2ns RX delay (and changing the value from pin-strapping RXD0 or the bootloader)\n",
++			val_rxdly ? "Enabling" : "Disabling");
++	} else {
++		dev_dbg(dev,
++			"2ns RX delay was already %s (by pin-strapping RXD0 or bootloader configuration)\n",
++			val_rxdly ? "enabled" : "disabled");
+ 	}
+ 
+ 	return 0;
+diff -Naur linux_org/drivers/soc/aspeed/aspeed-udma.c linux/drivers/soc/aspeed/aspeed-udma.c
+--- linux_org/drivers/soc/aspeed/aspeed-udma.c	2021-07-07 15:42:55.859649979 +0800
++++ linux/drivers/soc/aspeed/aspeed-udma.c	2021-07-07 15:42:32.104821087 +0800
+@@ -14,6 +14,11 @@
+ /* UART DMA registers offset */
+ #define UDMA_TX_DMA_EN		0x000
+ #define UDMA_RX_DMA_EN		0x004
++#define UDMA_MISC		0x008
++#define   UDMA_MISC_TX_BUFSZ_MASK	GENMASK(1, 0)
++#define   UDMA_MISC_TX_BUFSZ_SHIFT	0
++#define   UDMA_MISC_RX_BUFSZ_MASK	GENMASK(3, 2)
++#define   UDMA_MISC_RX_BUFSZ_SHIFT	2
+ #define UDMA_TIMEOUT_TIMER	0x00c
+ #define UDMA_TX_DMA_RST		0x020
+ #define UDMA_RX_DMA_RST		0x024
+@@ -363,6 +368,7 @@
+ static int aspeed_udma_probe(struct platform_device *pdev)
+ {
+ 	int i, rc;
++	uint32_t reg;
+ 	struct resource *res;
+ 	struct device *dev = &pdev->dev;
+ 
+@@ -395,6 +401,16 @@
+ 		return rc;
+ 	}
+ 
++	/*
++	 * For AST2600 A1 legacy design.
++	 *  - TX ringbuffer size: 4KB
++	 *  - RX ringbuffer size: 64KB
++	 *  - Timeout timer disabled
++	 */
++	reg = ((UDMA_BUFSZ_CODE_4KB << UDMA_MISC_TX_BUFSZ_SHIFT) & UDMA_MISC_TX_BUFSZ_MASK) |
++	      ((UDMA_BUFSZ_CODE_64KB << UDMA_MISC_RX_BUFSZ_SHIFT) & UDMA_MISC_RX_BUFSZ_MASK);
++	writel(reg, udma->regs + UDMA_MISC);
++	
+ 	for (i = 0; i < UDMA_MAX_CHANNEL; ++i) {
+ 		writel(0, udma->regs + UDMA_CHX_TX_WR_PTR(i));
+ 		writel(0, udma->regs + UDMA_CHX_RX_RD_PTR(i));

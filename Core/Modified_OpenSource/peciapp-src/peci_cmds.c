@@ -596,6 +596,8 @@ int main(int argc, char* argv[])
             printf("ERROR: Incorrect write length for raw command\n");
             goto ErrorExit;
         }
+        /*Reason for False Positive - parameters without wrong*/
+        /* coverity[Untrusted allocation size : FALSE] */
         uint8_t* rawCmd = (uint8_t*)calloc(writeLength, sizeof(uint8_t));
         if (rawCmd == NULL)
         {
@@ -618,6 +620,8 @@ int main(int argc, char* argv[])
             printf("\n");
         }
 
+        /*Reason for False Positive - parameters without wrong*/
+        /* coverity[Untrusted allocation size : FALSE] */
         uint8_t* rawResp = (uint8_t*)calloc(readLength, sizeof(uint8_t));
         if (rawResp == NULL)
         {

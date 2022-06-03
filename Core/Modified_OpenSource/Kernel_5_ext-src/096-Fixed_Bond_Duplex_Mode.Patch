@@ -1,0 +1,21 @@
+--- linux_old/drivers/net/phy/phy.c	2021-10-04 21:51:23.198050882 +0530
++++ linux/drivers/net/phy/phy.c	2021-10-04 21:59:27.470050715 +0530
+@@ -1221,11 +1221,17 @@
+ 				   const struct ethtool_link_ksettings *cmd)
+ {
+ 	struct phy_device *phydev = ndev->phydev;
++	int ret = 0;
+ 
+ 	if (!phydev)
+ 		return -ENODEV;
+ 
+-	return phy_ethtool_ksettings_set(phydev, cmd);
++	ret = phy_ethtool_ksettings_set(phydev, cmd);
++	
++	if(!ret)
++		call_netdevice_notifiers(NETDEV_CHANGE, ndev);
++	
++	return ret;
+ }
+ EXPORT_SYMBOL(phy_ethtool_set_link_ksettings);
+ 

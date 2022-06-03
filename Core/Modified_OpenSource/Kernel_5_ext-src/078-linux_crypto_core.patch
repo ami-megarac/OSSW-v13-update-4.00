@@ -1,0 +1,3464 @@
+diff -Naur linux_old/drivers/crypto/crypto_core/crypto.c linux/drivers/crypto/crypto_core/crypto.c
+--- linux_old/drivers/crypto/crypto_core/crypto.c	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/crypto.c	2021-06-20 16:36:26.398813592 +0530
+@@ -0,0 +1,1842 @@
++/*-
++ * Copyright (c) 2002-2006 Sam Leffler.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#if 0
++#include <sys/cdefs.h>
++__FBSDID("$FreeBSD$");
++#endif
++/*
++ * Cryptographic Subsystem.
++ *
++ * This code is derived from the Openbsd Cryptographic Framework (OCF)
++ * that has the copyright shown below.  Very little of the original
++ * code remains.
++ */
++
++/*-
++ * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
++ *
++ * This code was written by Angelos D. Keromytis in Athens, Greece, in
++ * February 2000. Network Security Technologies Inc. (NSTI) kindly
++ * supported the development of this code.
++ *
++ * Copyright (c) 2000, 2001 Angelos D. Keromytis
++ *
++ * Permission to use, copy, and modify this software with or without fee
++ * is hereby granted, provided that this entire notice is included in
++ * all source code copies of any software which is or includes a copy or
++ * modification of this software.
++ *
++ * THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR
++ * IMPLIED WARRANTY. IN PARTICULAR, NONE OF THE AUTHORS MAKES ANY
++ * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE
++ * MERCHANTABILITY OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR
++ * PURPOSE.
++ */
++
++#include <linux/mm.h>
++#include <linux/highmem.h>
++#include <linux/ioctl.h>
++#include <linux/random.h>
++#include <linux/scatterlist.h>
++#include <linux/uaccess.h>
++#include <crypto/algapi.h>
++#include <crypto/hash.h>
++#include <crypto/aead.h>
++#include <linux/rtnetlink.h>
++#include <crypto/authenc.h>
++#include <crypto/scatterwalk.h>
++#include <linux/scatterlist.h>
++#include <linux/asn1_ber_bytecode.h>
++#include <crypto/akcipher.h>
++#include "cryptodev.h"
++#include "_cryptodev.h"
++#include "crypto_helper.h"
++
++int crypto_helper_dev_get_cipher_keylen(unsigned int *keylen, struct session_op *sop,int aead)
++{
++	unsigned int klen = sop->keylen;
++
++	if (unlikely(sop->keylen > CRYPTO_CIPHER_MAX_KEY_LEN))
++	{
++		return -EINVAL;
++	}
++
++	if (aead && sop->mackeylen) {
++		if (unlikely(sop->mackeylen > CRYPTO_HMAC_MAX_KEY_LEN))
++		{
++			return -EINVAL;
++		}
++
++		klen += sop->mackeylen;
++		klen += RTA_SPACE(sizeof(struct crypto_authenc_key_param));
++	}
++
++	*keylen = klen;
++	return 0;
++}
++
++int crypto_helper_dev_get_cipher_key(uint8_t *key, struct session_op *sop, int aead)
++{
++	struct crypto_authenc_key_param *param=NULL;
++	struct rtattr *rta=NULL;
++	int ret = 0;
++
++	if (aead && sop->mackeylen) {
++		
++		rta = (void *)key;
++		rta->rta_type = CRYPTO_AUTHENC_KEYA_PARAM;
++		rta->rta_len = RTA_LENGTH(sizeof(*param));
++
++		param = RTA_DATA(rta);
++		param->enckeylen = cpu_to_be32(sop->keylen);
++
++		key += RTA_SPACE(sizeof(*param));
++		if (unlikely(copy_from_user(key, sop->mackey, sop->mackeylen))) {
++			ret = -EFAULT;
++			goto error;
++		}
++
++		key += sop->mackeylen;
++	}
++
++	if (unlikely(copy_from_user(key, sop->key, sop->keylen)))
++	{
++		ret = -EFAULT;
++	}
++
++error:
++	return ret;
++}
++
++static int helper_check_key_size(size_t keylen, const char *alg_name,unsigned int min_keysize, unsigned int max_keysize)
++{
++	if (max_keysize > 0 && unlikely((keylen < min_keysize) || (keylen > max_keysize))) {
++		DBUG("wrong key len\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++int crypto_helper_dev_cipher_init(struct cipher_data *out, const char *alg_name,
++		uint8_t *keyp, size_t keylen, int stream, int aead)
++{
++	int ret=0;
++	unsigned int min_keysize=0, max_keysize=0;
++	struct crypto_tfm *tfm=NULL;
++
++	if (aead == 0) {
++		out->async.s = crypto_alloc_skcipher(alg_name, 0, 0);
++		if (unlikely(IS_ERR(out->async.s))) {
++			return -EINVAL;
++		}
++
++		tfm = crypto_skcipher_tfm(out->async.s);
++		{
++			struct skcipher_alg *alg;
++
++			alg = crypto_skcipher_alg(out->async.s);
++			min_keysize = alg->min_keysize;
++			max_keysize = alg->max_keysize;
++		}
++
++		ret = helper_check_key_size(keylen, alg_name, min_keysize,max_keysize);
++		if (ret)
++		{
++			goto error;
++		}
++
++		out->blocksize = crypto_skcipher_blocksize(out->async.s);
++		out->ivsize = crypto_skcipher_ivsize(out->async.s);
++		out->alignmask = crypto_skcipher_alignmask(out->async.s);
++
++		ret = crypto_skcipher_setkey(out->async.s, keyp, keylen);
++	} else {
++		out->async.as = crypto_alloc_aead(alg_name, 0, 0);
++		if (unlikely(IS_ERR(out->async.as))) {
++			return -EINVAL;
++		}
++
++		out->blocksize = crypto_aead_blocksize(out->async.as);
++		out->ivsize = crypto_aead_ivsize(out->async.as);
++		out->alignmask = crypto_aead_alignmask(out->async.as);
++
++		ret = crypto_aead_setkey(out->async.as, keyp, keylen);
++	}
++
++	if (unlikely(ret)) {
++		DBUG("key set failed\n");
++		ret = -EINVAL;
++		goto error;
++	}
++
++	out->stream = stream;
++	out->aead = aead;
++
++	init_completion(&out->async.result.completion);
++
++	if (aead == 0) {
++		out->async.request = skcipher_request_alloc(out->async.s, GFP_KERNEL);
++		if (unlikely(!out->async.request)) {
++			DBUG("error in allocating async crypto request\n");
++			ret = -ENOMEM;
++			goto error;
++		}
++
++		skcipher_request_set_callback(out->async.request,
++				CRYPTO_TFM_REQ_MAY_BACKLOG,
++				crypto_helper_dev_complete, &out->async.result);
++	} else {
++		out->async.arequest = aead_request_alloc(out->async.as, GFP_KERNEL);
++		if (unlikely(!out->async.arequest)) {
++			DBUG("error in allocating async crypto request\n");
++			ret = -ENOMEM;
++			goto error;
++		}
++
++		aead_request_set_callback(out->async.arequest,
++				CRYPTO_TFM_REQ_MAY_BACKLOG,
++				crypto_helper_dev_complete, &out->async.result);
++	}
++
++	out->init = 1;
++	return 0;
++
++error:
++	if (aead == 0) {
++		skcipher_request_free(out->async.request);
++		crypto_free_skcipher(out->async.s);
++	} else {
++		if (out->async.arequest)
++			aead_request_free(out->async.arequest);
++		if (out->async.as)
++			crypto_free_aead(out->async.as);
++	}
++
++	return ret;
++}
++
++void crypto_helper_dev_cipher_deinit(struct cipher_data *cdata)
++{
++	if (cdata->init) {
++		if (cdata->aead == 0) {
++			skcipher_request_free(cdata->async.request);
++			crypto_free_skcipher(cdata->async.s);
++		} else {
++			if (cdata->async.arequest)
++				aead_request_free(cdata->async.arequest);
++			if (cdata->async.as)
++				crypto_free_aead(cdata->async.as);
++		}
++
++		cdata->init = 0;
++	}
++	return;
++}
++
++static inline int helper_waitfor(struct crypto_helper_dev_result *cr, ssize_t ret)
++{
++	switch (ret) {
++	case 0:
++		break;
++	case -EINPROGRESS:
++	case -EBUSY:
++		wait_for_completion(&cr->completion);
++		if (unlikely(cr->err)) {
++			DBUG("error from async request\n");
++			return cr->err;
++		}
++		break;
++	default:
++		return ret;
++	}
++
++	return 0;
++}
++
++ssize_t crypto_helper_dev_cipher_encrypt(struct cipher_data *cdata,
++		const struct scatterlist *src, struct scatterlist *dst,
++		size_t len)
++{
++	int ret=0;
++
++	reinit_completion(&cdata->async.result.completion);
++
++	if (cdata->aead == 0) {
++		skcipher_request_set_crypt(cdata->async.request,
++				(struct scatterlist *)src, dst,
++				len, cdata->async.iv);
++		ret = crypto_skcipher_encrypt(cdata->async.request);
++	} else {
++		aead_request_set_crypt(cdata->async.arequest,
++				(struct scatterlist *)src, dst,
++				len, cdata->async.iv);
++		ret = crypto_aead_encrypt(cdata->async.arequest);
++	}
++
++	return helper_waitfor(&cdata->async.result, ret);
++}
++
++ssize_t crypto_helper_dev_cipher_decrypt(struct cipher_data *cdata,
++		const struct scatterlist *src, struct scatterlist *dst,
++		size_t len)
++{
++	int ret=0;
++
++	reinit_completion(&cdata->async.result.completion);
++	if (cdata->aead == 0) {
++		skcipher_request_set_crypt(cdata->async.request,
++				(struct scatterlist *)src, dst,
++				len, cdata->async.iv);
++		ret = crypto_skcipher_decrypt(cdata->async.request);
++	} else {
++		aead_request_set_crypt(cdata->async.arequest,
++				(struct scatterlist *)src, dst,
++				len, cdata->async.iv);
++		ret = crypto_aead_decrypt(cdata->async.arequest);
++	}
++
++	return helper_waitfor(&cdata->async.result, ret);
++}
++
++int crypto_helper_dev_hash_init(struct hash_data *hdata, const char *alg_name,
++		int hmac_mode, void *mackey, size_t mackeylen)
++{
++	int ret=0;
++
++	hdata->async.s = crypto_alloc_ahash(alg_name, 0, 0);
++	if (unlikely(IS_ERR(hdata->async.s))) {
++		DBUG("error in crypto_alloc_ahash\n");
++		return -EINVAL;
++	}
++
++	if (hmac_mode != 0) {
++		ret = crypto_ahash_setkey(hdata->async.s, mackey, mackeylen);
++		if (unlikely(ret)) {
++			DBUG("Setting hmac key failed\n");
++			ret = -EINVAL;
++			goto error;
++		}
++	}
++
++	hdata->digestsize = crypto_ahash_digestsize(hdata->async.s);
++	hdata->alignmask = crypto_ahash_alignmask(hdata->async.s);
++
++	init_completion(&hdata->async.result.completion);
++
++	hdata->async.request = ahash_request_alloc(hdata->async.s, GFP_KERNEL);
++	if (unlikely(!hdata->async.request)) {
++		DBUG("error in ahash_request_alloc\n");
++		ret = -ENOMEM;
++		goto error;
++	}
++
++	ahash_request_set_callback(hdata->async.request,
++			CRYPTO_TFM_REQ_MAY_BACKLOG,
++			crypto_helper_dev_complete, &hdata->async.result);
++	hdata->init = 1;
++	return 0;
++
++error:
++	crypto_free_ahash(hdata->async.s);
++	return ret;
++}
++
++void crypto_helper_dev_hash_deinit(struct hash_data *hdata)
++{
++	if (hdata->init) {
++		ahash_request_free(hdata->async.request);
++		crypto_free_ahash(hdata->async.s);
++		hdata->init = 0;
++	}
++	return;
++}
++
++int crypto_helper_dev_hash_reset(struct hash_data *hdata)
++{
++	int ret=0;
++
++	ret = crypto_ahash_init(hdata->async.request);
++	if (unlikely(ret)) {
++		DBUG("error in crypto_ahash_init\n");
++		return ret;
++	}
++
++	return 0;
++}
++
++ssize_t crypto_helper_dev_hash_update(struct hash_data *hdata,
++		struct scatterlist *sg, size_t len)
++{
++	int ret=0;
++
++	reinit_completion(&hdata->async.result.completion);
++	ahash_request_set_crypt(hdata->async.request, sg, NULL, len);
++
++	ret = crypto_ahash_update(hdata->async.request);
++
++	return helper_waitfor(&hdata->async.result, ret);
++}
++
++int crypto_helper_dev_hash_final(struct hash_data *hdata, void *output)
++{
++	int ret=0;
++
++	reinit_completion(&hdata->async.result.completion);
++	ahash_request_set_crypt(hdata->async.request, NULL, output, 0);
++
++	ret = crypto_ahash_final(hdata->async.request);
++
++	return helper_waitfor(&hdata->async.result, ret);
++}
++
++int crypto_helper_dev_hash_copy(struct hash_data *dst, struct hash_data *src)
++{
++	int ret=0, statesize=0;
++	void *statedata = NULL;
++	struct crypto_tfm *tfm=NULL;
++
++	if (unlikely(src == NULL || dst == NULL)) {
++		return -EINVAL;
++	}
++
++	reinit_completion(&src->async.result.completion);
++
++	statesize = crypto_ahash_statesize(src->async.s);
++	if (unlikely(statesize <= 0)) {
++		return -EINVAL;
++	}
++
++	statedata = kzalloc(statesize, GFP_KERNEL);
++	if (unlikely(statedata == NULL)) {
++		return -ENOMEM;
++	}
++
++	ret = crypto_ahash_export(src->async.request, statedata);
++	if (unlikely(ret < 0)) {
++		if (unlikely(ret == -ENOSYS)) {
++			tfm = crypto_ahash_tfm(src->async.s);
++			DBUG("not implemented\n");
++		}
++		goto out;
++	}
++
++	ret = crypto_ahash_import(dst->async.request, statedata);
++	if (unlikely(ret == -ENOSYS)) {
++		tfm = crypto_ahash_tfm(dst->async.s);
++		DBUG("not implemented\n");
++	}
++out:
++	kfree(statedata);
++	statedata=NULL;
++	return ret;
++}
++
++void helper_reverse_buf(uint8_t *buf, size_t buf_len)
++{
++	int i=0;
++	uint8_t *end=NULL;
++	uint8_t tmp=0;
++
++	end = buf + buf_len;
++
++	for (i = 0; i < buf_len/2; i++) {
++		end--;
++		tmp = *buf;
++		*buf = *end;
++		*end = tmp;
++		buf++;
++	}
++	return;
++}
++
++int helper_ber_wr_tag(uint8_t **ber_ptr, uint8_t tag)
++{
++	**ber_ptr = tag;
++	*ber_ptr += 1;
++
++	return 0;
++}
++
++int helper_ber_wr_len(uint8_t **ber_ptr, size_t len, size_t sz)
++{
++	if (len < 127) {
++		**ber_ptr = len;
++		*ber_ptr += 1;
++	} else {
++		size_t sz_save = sz;
++
++		sz--;
++		**ber_ptr = 0x80 | sz;
++
++		while (sz > 0) {
++			*(*ber_ptr + sz) = len & 0xff;
++			len >>= 8;
++			sz--;
++		}
++		*ber_ptr += sz_save;
++	}
++
++	return 0;
++}
++
++int helper_ber_wr_int(uint8_t **ber_ptr, uint8_t *crp_p, size_t sz)
++{
++	int ret=0;
++
++	ret = copy_from_user(*ber_ptr, crp_p, sz);
++
++	*ber_ptr += sz;
++
++	return ret;
++}
++
++size_t helper_ber_enc_len(size_t len)
++{
++	size_t sz=0;
++
++	sz = 1;
++	if (len > 127) {
++		while (len != 0) {
++			len >>= 8;
++			sz++;
++		}
++	}
++
++	return sz;
++}
++
++void *crypto_helper_dev_alloc_rsa_pub_key(struct kernel_crypt_pkop *pkop,uint32_t *key_len)
++{
++	struct crypt_kop *cop = &pkop->pkop;
++	uint8_t *ber_key=NULL;
++	uint8_t *ber_ptr=NULL;
++	uint32_t ber_key_len=0;
++	size_t s_sz=0;
++	size_t e_sz=0;
++	size_t n_sz=0;
++	size_t s_enc_len=0;
++	size_t e_enc_len=0;
++	size_t n_enc_len=0;
++	int err=0;
++
++	e_sz = (cop->crk_param[1].crp_nbits + 7)/8;
++	n_sz = (cop->crk_param[2].crp_nbits + 7)/8;
++
++	e_enc_len = helper_ber_enc_len(e_sz);
++	n_enc_len = helper_ber_enc_len(n_sz);
++
++	s_sz = e_sz + e_enc_len + n_sz + n_enc_len + 2;
++	s_enc_len = helper_ber_enc_len(s_sz);
++
++	ber_key_len = s_sz + s_enc_len + 1;
++
++	if (ber_key_len > 65535) {
++		return NULL;
++	}
++
++	ber_key = kmalloc(ber_key_len, GFP_DMA);
++	if (!ber_key) {
++		return NULL;
++	}
++
++	ber_ptr = ber_key;
++
++	err = helper_ber_wr_tag(&ber_ptr, _tag(UNIV, CONS, SEQ))         ||
++			helper_ber_wr_len(&ber_ptr, s_sz, s_enc_len)               ||
++			helper_ber_wr_tag(&ber_ptr, _tag(UNIV, PRIM, INT))         ||
++			helper_ber_wr_len(&ber_ptr, n_sz, n_enc_len)               ||
++			helper_ber_wr_int(&ber_ptr, cop->crk_param[2].crp_p, n_sz) ||
++			helper_ber_wr_tag(&ber_ptr, _tag(UNIV, PRIM, INT))         ||
++			helper_ber_wr_len(&ber_ptr, e_sz, e_enc_len)               ||
++			helper_ber_wr_int(&ber_ptr, cop->crk_param[1].crp_p, e_sz);
++
++	if (err != 0) {
++		goto free_key;
++	}
++
++	*key_len = ber_key_len;
++	return ber_key;
++
++free_key:
++	kfree(ber_key);
++	ber_key=NULL;
++	return NULL;
++}
++
++int helper_cipher_bn_modexp(struct kernel_crypt_pkop *pkop)
++{
++	struct crypt_kop *cop = &pkop->pkop;
++	uint8_t *ber_key=NULL;
++	uint32_t ber_key_len=0;
++	size_t m_sz=0;
++	size_t c_sz=0;
++	size_t c_sz_max=0;
++	uint8_t *m_buf=NULL;
++	uint8_t *c_buf=NULL;
++	struct scatterlist src;
++	struct scatterlist dst;
++	int err=0;
++	
++	memset(&src,0,sizeof(src));
++	memset(&dst,0,sizeof(dst));
++
++	ber_key = crypto_helper_dev_alloc_rsa_pub_key(pkop, &ber_key_len);
++	if (!ber_key) {
++		return -ENOMEM;
++	}
++
++	err = crypto_akcipher_set_pub_key(pkop->s, ber_key, ber_key_len);
++	if (err != 0) {
++		goto free_key;
++	}
++
++	m_sz = (cop->crk_param[0].crp_nbits + 7)/8;
++	c_sz = (cop->crk_param[3].crp_nbits + 7)/8;
++
++	m_buf = kmalloc(m_sz, GFP_DMA);
++	if (!m_buf) {
++		err = -ENOMEM;
++		goto free_key;
++	}
++
++	err = copy_from_user(m_buf, cop->crk_param[0].crp_p, m_sz);
++	if (err != 0) {
++		goto free_m_buf;
++	}
++
++	c_sz_max = crypto_akcipher_maxsize(pkop->s);
++
++	if (c_sz > c_sz_max) {
++		err = -EINVAL;
++		goto free_m_buf;
++	}
++
++	c_buf = kzalloc(c_sz_max, GFP_KERNEL);
++	if (!c_buf) {
++		goto free_m_buf;
++	}
++
++	sg_init_one(&src, m_buf, m_sz);
++	sg_init_one(&dst, c_buf, c_sz);
++
++	init_completion(&pkop->result.completion);
++	akcipher_request_set_callback(pkop->req, 0,
++			crypto_helper_dev_complete, &pkop->result);
++	akcipher_request_set_crypt(pkop->req, &src, &dst, m_sz, c_sz);
++
++	err = crypto_akcipher_encrypt(pkop->req);
++	err = helper_waitfor(&pkop->result, err);
++
++	if (err == 0) {
++		helper_reverse_buf(c_buf, pkop->req->dst_len);
++		err = copy_to_user(cop->crk_param[3].crp_p, c_buf, c_sz);
++	}
++
++	kfree(c_buf);
++	c_buf=NULL;
++free_m_buf:
++	kfree(m_buf);
++	m_buf=NULL;
++free_key:
++	kfree(ber_key);
++	ber_key=NULL;
++
++	return err;
++}
++
++static int helper_cipher_hash_and_crypt(struct csession *ses_ptr, struct crypt_op *cop,
++		struct scatterlist *src_sg, struct scatterlist *dst_sg,
++		uint32_t len)
++{
++	int ret=0;
++
++	if (cop->op == COP_ENCRYPT) {
++		if (ses_ptr->hdata.init != 0) {
++			ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++					src_sg, len);
++			if (unlikely(ret))
++				goto out_err;
++		}
++		if (ses_ptr->cdata.init != 0) {
++			ret = crypto_helper_dev_cipher_encrypt(&ses_ptr->cdata,
++					src_sg, dst_sg, len);
++
++			if (unlikely(ret))
++				goto out_err;
++		}
++	} else {
++		if (ses_ptr->cdata.init != 0) {
++			ret = crypto_helper_dev_cipher_decrypt(&ses_ptr->cdata,
++					src_sg, dst_sg, len);
++
++			if (unlikely(ret))
++				goto out_err;
++		}
++
++		if (ses_ptr->hdata.init != 0) {
++			ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++					dst_sg, len);
++			if (unlikely(ret))
++				goto out_err;
++		}
++	}
++
++	return 0;
++
++out_err:
++	return ret;
++}
++
++static int helper_cipher_run_stdandard(struct csession *ses_ptr, struct crypt_op *cop)
++{
++	char *data=NULL;
++	char __user *src=NULL, *dst=NULL;
++	struct scatterlist sg;
++	size_t nbytes=0, bufsize=0;
++	int ret = 0;
++
++	memset(&sg,0,sizeof(sg));
++
++	nbytes = cop->len;
++	data = (char *)__get_free_page(GFP_KERNEL);
++
++	if (unlikely(!data)) {
++		DBUG("error get_free_page\n");
++		return -ENOMEM;
++	}
++
++	bufsize = PAGE_SIZE < nbytes ? PAGE_SIZE : nbytes;
++
++	src = cop->src;
++	dst = cop->dst;
++
++	while (nbytes > 0) {
++		size_t current_len = nbytes > bufsize ? bufsize : nbytes;
++
++		if (unlikely(copy_from_user(data, src, current_len))) {
++			DBUG("copy_from_user failed\n");
++			ret = -EFAULT;
++			break;
++		}
++
++		sg_init_one(&sg, data, current_len);
++
++		ret = helper_cipher_hash_and_crypt(ses_ptr, cop, &sg, &sg, current_len);
++
++		if (unlikely(ret)) {
++			DBUG("hash and crypt failed\n");
++			break;
++		}
++
++		if (ses_ptr->cdata.init != 0) {
++			if (unlikely(copy_to_user(dst, data, current_len))) {
++				DBUG("copy_to_user failed\n");
++				ret = -EFAULT;
++				break;
++			}
++		}
++
++		dst += current_len;
++		nbytes -= current_len;
++		src += current_len;
++	}
++
++	free_page((unsigned long)data);
++	return ret;
++}
++
++static int helper_cipher_run_zync(struct csession *ses_ptr, struct kernel_crypt_op *kcop)
++{
++	struct scatterlist *src_sg=NULL, *dst_sg;
++	struct crypt_op *cop = &kcop->cop;
++	int ret = 0;
++
++	ret = helper_cipher_get_userbuf(ses_ptr, cop->src, cop->len, cop->dst, cop->len,
++			kcop->task, kcop->mm, &src_sg, &dst_sg);
++	if (unlikely(ret)) {
++		DBUG("error in helper_cipher_get_userbuf\n");
++		return helper_cipher_run_stdandard(ses_ptr, cop);
++	}
++
++	ret = helper_cipher_hash_and_crypt(ses_ptr, cop, src_sg, dst_sg, cop->len);
++
++	helper_cipher_release_user_pages(ses_ptr);
++	return ret;
++}
++
++int cipher_run(struct fcrypt *fcr, struct kernel_crypt_op *kcop)
++{
++	struct csession *ses_ptr=NULL;
++	struct crypt_op *cop = &kcop->cop;
++	int ret=0;
++
++	if (unlikely(cop->op != COP_ENCRYPT && cop->op != COP_DECRYPT)) {
++		return -EINVAL;
++	}
++
++	ses_ptr = crypto_get_session_by_sid(fcr, cop->ses);
++	if (unlikely(!ses_ptr)) {
++		return -EINVAL;
++	}
++
++	if (ses_ptr->hdata.init != 0 && (cop->flags == 0 || cop->flags & CRYPTO_OP_FLAG_RESET)) {
++		ret = crypto_helper_dev_hash_reset(&ses_ptr->hdata);
++		if (unlikely(ret)) {
++			goto out_unlock;
++		}
++	}
++
++	if (ses_ptr->cdata.init != 0) {
++		int blocksize = ses_ptr->cdata.blocksize;
++
++		if (unlikely(cop->len % blocksize)) {
++			ret = -EINVAL;
++			goto out_unlock;
++		}
++
++		crypto_helper_dev_cipher_set_iv(&ses_ptr->cdata, kcop->iv,
++				min(ses_ptr->cdata.ivsize, kcop->ivlen));
++	}
++
++	if (likely(cop->len)) {
++		if (!(cop->flags & CRYPTO_OP_FLAG_NO_ZC)) {
++			if (unlikely(ses_ptr->alignmask && !IS_ALIGNED((unsigned long)cop->src, ses_ptr->alignmask + 1))) {
++				cop->flags |= CRYPTO_OP_FLAG_NO_ZC;
++			}
++
++			if (unlikely(ses_ptr->alignmask && !IS_ALIGNED((unsigned long)cop->dst, ses_ptr->alignmask + 1))) {
++				cop->flags |= CRYPTO_OP_FLAG_NO_ZC;
++			}
++		}
++
++		if (cop->flags & CRYPTO_OP_FLAG_NO_ZC)
++			ret = helper_cipher_run_stdandard(ses_ptr, &kcop->cop);
++		else
++			ret = helper_cipher_run_zync(ses_ptr, kcop);
++		if (unlikely(ret))
++			goto out_unlock;
++	}
++
++	if (ses_ptr->cdata.init != 0) {
++		crypto_helper_dev_cipher_get_iv(&ses_ptr->cdata, kcop->iv,
++				min(ses_ptr->cdata.ivsize, kcop->ivlen));
++	}
++
++	if (ses_ptr->hdata.init != 0 &&
++			((cop->flags & CRYPTO_OP_FLAG_FINAL) ||
++					(!(cop->flags & CRYPTO_OP_FLAG_UPDATE) || cop->len == 0))) {
++
++		ret = crypto_helper_dev_hash_final(&ses_ptr->hdata, kcop->hash_output);
++		if (unlikely(ret)) {
++			DBUG("crypto_helper_dev_hash_final failed\n");
++			goto out_unlock;
++		}
++		kcop->digestsize = ses_ptr->hdata.digestsize;
++	}
++
++out_unlock:
++	mutex_unlock(&ses_ptr->sem);
++	return ret;
++}
++
++int cipher_run_asym(struct kernel_crypt_pkop *pkop)
++{
++	int err=0;
++
++	switch (pkop->pkop.crk_op) {
++	case CRK_MOD_EXP:
++		pkop->s = crypto_alloc_akcipher("rsa", 0, 0);
++		if (IS_ERR(pkop->s)) {
++			return PTR_ERR(pkop->s);
++		}
++
++		pkop->req = akcipher_request_alloc(pkop->s, GFP_KERNEL);
++		if (pkop->req == NULL) {
++			err = -ENOMEM;
++			goto out_free_tfm;
++		}
++		if (pkop->pkop.crk_iparams != 3 && pkop->pkop.crk_oparams != 1) {
++			err = -EINVAL;
++			goto out_free_req;
++		}
++		err = helper_cipher_bn_modexp(pkop);
++		break;
++	default:
++		err = -EINVAL;
++		break;
++	}
++
++out_free_req:
++	kfree(pkop->req);
++
++out_free_tfm:
++	crypto_free_akcipher(pkop->s);
++
++	return err;
++}
++
++struct scatterlist *helper_cipher_sg_advance(struct scatterlist *sg, int consumed)
++{
++	while (consumed >= sg->length) {
++		consumed -= sg->length;
++
++		sg = sg_next(sg);
++		if (!sg)
++			break;
++	}
++
++	WARN_ON(!sg && consumed);
++
++	if (!sg)
++	{
++		return NULL;
++	}
++
++	sg->offset += consumed;
++	sg->length -= consumed;
++
++	if (sg->offset >= PAGE_SIZE) {
++		struct page *page =
++				nth_page(sg_page(sg), sg->offset / PAGE_SIZE);
++		sg_set_page(sg, page, sg->length, sg->offset % PAGE_SIZE);
++	}
++
++	return sg;
++}
++
++int helper_cipher_sg_copy(struct scatterlist *sg_from, struct scatterlist *sg_to, int len)
++{
++	while (len > sg_from->length) {
++		len -= sg_from->length;
++
++		sg_set_page(sg_to, sg_page(sg_from),
++				sg_from->length, sg_from->offset);
++
++		sg_to = sg_next(sg_to);
++		sg_from = sg_next(sg_from);
++
++		if (len && (!sg_from || !sg_to))
++			return -ENOMEM;
++	}
++
++	if (len)
++		sg_set_page(sg_to, sg_page(sg_from),
++				len, sg_from->offset);
++	sg_mark_end(sg_to);
++	return 0;
++}
++
++int helper_1_get_userbuf(uint8_t __user *addr, uint32_t len, int write,
++		unsigned int pgcount, struct page **pg, struct scatterlist *sg,
++		struct task_struct *task, struct mm_struct *mm)
++{
++	int ret=0, pglen, i = 0;
++	struct scatterlist *sgp=NULL;
++
++	if (unlikely(!pgcount || !len || !addr)) {
++		sg_mark_end(sg);
++		return 0;
++	}
++
++	down_read(&mm->mmap_sem);
++
++	ret = get_user_pages_remote(task, mm,
++			(unsigned long)addr, pgcount, write ? FOLL_WRITE : 0,
++					pg, NULL, NULL);
++
++	up_read(&mm->mmap_sem);
++
++	if (ret != pgcount)
++	{
++		return -EINVAL;
++	}
++
++	sg_init_table(sg, pgcount);
++
++	pglen = min((ptrdiff_t)(PAGE_SIZE - PAGEOFFSET(addr)), (ptrdiff_t)len);
++	sg_set_page(sg, pg[i++], pglen, PAGEOFFSET(addr));
++
++	len -= pglen;
++	for (sgp = sg_next(sg); len; sgp = sg_next(sgp)) {
++		pglen = min((uint32_t)PAGE_SIZE, len);
++		sg_set_page(sgp, pg[i++], pglen, 0);
++		len -= pglen;
++	}
++	sg_mark_end(sg_last(sg, pgcount));
++	return 0;
++}
++
++int helper_adjust_cipher_sg_array(struct csession *ses, int pagecount)
++{
++	struct scatterlist *sg=NULL;
++	struct page **pages;
++	int array_size=0;
++
++	for (array_size = ses->array_size; array_size < pagecount;
++			array_size *= 2)
++		;
++
++	pages = krealloc(ses->pages, array_size * sizeof(struct page *),
++			GFP_KERNEL);
++	if (unlikely(!pages))
++		return -ENOMEM;
++	ses->pages = pages;
++	sg = krealloc(ses->sg, array_size * sizeof(struct scatterlist),
++			GFP_KERNEL);
++	if (unlikely(!sg))
++		return -ENOMEM;
++	ses->sg = sg;
++	ses->array_size = array_size;
++
++	return 0;
++}
++
++void helper_cipher_release_user_pages(struct csession *ses)
++{
++	unsigned int i=0;
++
++	for (i = 0; i < ses->used_pages; i++) {
++		if (!PageReserved(ses->pages[i]))
++			SetPageDirty(ses->pages[i]);
++
++		if (ses->readonly_pages == 0)
++			flush_dcache_page(ses->pages[i]);
++		else
++			ses->readonly_pages--;
++
++		put_page(ses->pages[i]);
++	}
++	ses->used_pages = 0;
++	return;
++}
++
++int helper_cipher_get_userbuf(struct csession *ses,
++		void *__user src, unsigned int src_len,
++		void *__user dst, unsigned int dst_len,
++		struct task_struct *task, struct mm_struct *mm,
++		struct scatterlist **src_sg,
++		struct scatterlist **dst_sg)
++{
++	int src_pagecount=0, dst_pagecount=0;
++	int rc=0;
++
++	if (!src && src_len)
++		src_len = 0;
++
++	if (!dst && dst_len)
++		dst_len = 0;
++
++	src_pagecount = CRYPTO_PAGECOUNT(src, src_len);
++	dst_pagecount = CRYPTO_PAGECOUNT(dst, dst_len);
++
++	ses->used_pages = (src == dst) ? max(src_pagecount, dst_pagecount)
++			: src_pagecount + dst_pagecount;
++
++	ses->readonly_pages = (src == dst) ? 0 : src_pagecount;
++
++	if (ses->used_pages > ses->array_size) {
++		rc = helper_adjust_cipher_sg_array(ses, ses->used_pages);
++		if (rc)
++			return rc;
++	}
++
++	if (src == dst) {
++		if (src_len < dst_len)
++			src_len = dst_len;
++		rc = helper_1_get_userbuf(src, src_len, 1, ses->used_pages,
++				ses->pages, ses->sg, task, mm);
++		if (unlikely(rc)) {
++			DBUG("get_userbuf failed\n");
++			return rc;
++		}
++		(*src_sg) = (*dst_sg) = ses->sg;
++		return 0;
++	}
++
++	*src_sg = NULL;
++	*dst_sg = NULL;
++
++	if (likely(src)) {
++		rc = helper_1_get_userbuf(src, src_len, 0, ses->readonly_pages,
++				ses->pages, ses->sg, task, mm);
++		if (unlikely(rc)) {
++			DBUG("failed to get user pages for data input..\n");
++			return rc;
++		}
++		*src_sg = ses->sg;
++	}
++
++	if (likely(dst)) {
++		const unsigned int writable_pages =
++				ses->used_pages - ses->readonly_pages;
++		struct page **dst_pages = ses->pages + ses->readonly_pages;
++		*dst_sg = ses->sg + ses->readonly_pages;
++
++		rc = helper_1_get_userbuf(dst, dst_len, 1, writable_pages,
++				dst_pages, *dst_sg, task, mm);
++		if (unlikely(rc)) {
++			DBUG("failed to get user pages for data output..\n");
++			helper_cipher_release_user_pages(ses);
++			return rc;
++		}
++	}
++
++	return 0;
++}
++
++static int helper_cipher_get_userbuf_tls(struct csession *ses, struct kernel_crypt_auth_op *kcaop,
++		struct scatterlist **dst_sg)
++{
++	int pagecount = 0;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	int rc=0;
++
++	if (caop->dst == NULL)
++	{
++		return -EINVAL;
++	}
++
++	if (ses->alignmask) {
++		if (!IS_ALIGNED((unsigned long)caop->dst, ses->alignmask + 1))
++			{
++				DBUG("issue in byte allignment\n");
++			}
++	}
++
++	if (kcaop->dst_len == 0) {
++		return -EINVAL;
++	}
++
++	pagecount = CRYPTO_PAGECOUNT(caop->dst, kcaop->dst_len);
++
++	ses->used_pages = pagecount;
++	ses->readonly_pages = 0;
++
++	rc = helper_adjust_cipher_sg_array(ses, pagecount);
++	if (rc)
++		return rc;
++
++	rc = helper_1_get_userbuf(caop->dst, kcaop->dst_len, 1, pagecount,
++			ses->pages, ses->sg, kcaop->task, kcaop->mm);
++	if (unlikely(rc)) {
++		DBUG("get_userbuf\n");
++		return -EINVAL;
++	}
++
++	(*dst_sg) = ses->sg;
++
++	return 0;
++}
++
++static int helper_cipher_get_userbuf_srtp(struct csession *ses, struct kernel_crypt_auth_op *kcaop,
++		struct scatterlist **auth_sg, struct scatterlist **dst_sg)
++{
++	int pagecount=0, diff=0;
++	int auth_pagecount = 0;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	int rc=0;
++
++	if (caop->dst == NULL && caop->auth_src == NULL) {
++		DBUG("Null pointer\n");
++		return -EINVAL;
++	}
++
++	if (ses->alignmask) {
++		if (!IS_ALIGNED((unsigned long)caop->dst, ses->alignmask + 1))
++		{
++			DBUG("bytes not alligned\n");
++		}
++		if (!IS_ALIGNED((unsigned long)caop->auth_src, ses->alignmask + 1))
++		{
++			DBUG("bytes not alligned\n");
++		}
++	}
++
++	if (unlikely(kcaop->dst_len == 0 || caop->auth_len == 0)) {
++		DBUG("dst len is zero\n");
++		return -EINVAL;
++	}
++
++	auth_pagecount = CRYPTO_PAGECOUNT(caop->auth_src, caop->auth_len);
++	diff = (int)(caop->src - caop->auth_src);
++	if (diff > MAX_SRTP_AUTH_DATA_DIFF || diff < 0) {
++		DBUG("auth_src must overlap with src\n");
++		return -EINVAL;
++	}
++
++	pagecount = auth_pagecount;
++
++	rc = helper_adjust_cipher_sg_array(ses, pagecount*2);
++	if (rc) {
++		DBUG("helper_adjust_cipher_sg_array failed\n");
++		return rc;
++	}
++
++	rc = helper_1_get_userbuf(caop->auth_src, caop->auth_len, 1, auth_pagecount,
++			ses->pages, ses->sg, kcaop->task, kcaop->mm);
++	if (unlikely(rc)) {
++		DBUG("get_userbuf failed\n");
++		return -EINVAL;
++	}
++
++	ses->used_pages = pagecount;
++	ses->readonly_pages = 0;
++
++	(*auth_sg) = ses->sg;
++
++	(*dst_sg) = ses->sg + auth_pagecount;
++	sg_init_table(*dst_sg, auth_pagecount);
++	helper_cipher_sg_copy(ses->sg, (*dst_sg), caop->auth_len);
++	(*dst_sg) = helper_cipher_sg_advance(*dst_sg, diff);
++	if (*dst_sg == NULL) {
++		helper_cipher_release_user_pages(ses);
++		DBUG("helper_cipher_sg_advance failed\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int crypto_helper_dev_get_tag_len(struct csession *ses_ptr)
++{
++	if (ses_ptr->hdata.init)
++		return ses_ptr->hdata.digestsize;
++	else
++		return crypto_helper_dev_cipher_get_tag_size(&ses_ptr->cdata);
++}
++
++static int crypto_helper_dev_get_dst_len(struct crypt_auth_op *caop, struct csession *ses_ptr)
++{
++	int dst_len = caop->len;
++	if (caop->op == COP_DECRYPT)
++		return dst_len;
++
++	dst_len += caop->tag_len;
++
++	if (caop->flags & CRYPTO_OP_FLAG_AEAD_TLS_TYPE) {
++		int bs = ses_ptr->cdata.blocksize;
++		dst_len += bs - (dst_len % bs);
++	}
++
++	return dst_len;
++}
++
++static int helper_fill_kcaop_from_caop(struct kernel_crypt_auth_op *kcaop, struct fcrypt *fcr)
++{
++	struct crypt_auth_op *caop = &kcaop->caop;
++	struct csession *ses_ptr=NULL;
++	int ret=0;
++
++	ses_ptr = crypto_get_session_by_sid(fcr, caop->ses);
++	if (unlikely(!ses_ptr)) {
++		DBUG("invalid session ID\n");
++		return -EINVAL;
++	}
++
++	if (caop->flags & CRYPTO_OP_FLAG_AEAD_TLS_TYPE || caop->flags & CRYPTO_OP_FLAG_AEAD_SRTP_TYPE) {
++		if (caop->src != caop->dst) {
++			DBUG("not implemented\n");
++			ret = -EINVAL;
++			goto out_unlock;
++		}
++	}
++
++	if (caop->tag_len == 0)
++		caop->tag_len = crypto_helper_dev_get_tag_len(ses_ptr);
++
++	kcaop->ivlen = caop->iv ? ses_ptr->cdata.ivsize : 0;
++	kcaop->dst_len = crypto_helper_dev_get_dst_len(caop, ses_ptr);
++	kcaop->task = current;
++	kcaop->mm = current->mm;
++
++	if (caop->iv) {
++		ret = copy_from_user(kcaop->iv, caop->iv, kcaop->ivlen);
++		if (unlikely(ret)) {
++			DBUG("copy_from_user failed\n");
++			ret = -EFAULT;
++			goto out_unlock;
++		}
++	}
++
++	ret = 0;
++
++out_unlock:
++	mutex_unlock(&ses_ptr->sem);
++	return ret;
++
++}
++
++static int cipher_fill_caop_from_kcaop(struct kernel_crypt_auth_op *kcaop, struct fcrypt *fcr)
++{
++	int ret=0;
++
++	kcaop->caop.len = kcaop->dst_len;
++
++	if (kcaop->ivlen && kcaop->caop.flags & CRYPTO_OP_FLAG_WRITE_IV) {
++		ret = copy_to_user(kcaop->caop.iv,
++				kcaop->iv, kcaop->ivlen);
++		if (unlikely(ret)) {
++			DBUG("copy_to_user failed\n");
++			return -EFAULT;
++		}
++	}
++	return 0;
++}
++
++int helper_from_user_to_k(struct kernel_crypt_auth_op *kcaop,
++		struct fcrypt *fcr, void __user *arg)
++{
++	if (unlikely(copy_from_user(&kcaop->caop, arg, sizeof(kcaop->caop)))) {
++		DBUG("copy_from_user failed\n");
++		return -EFAULT;
++	}
++
++	return helper_fill_kcaop_from_caop(kcaop, fcr);
++}
++
++int helper_k_to_user(struct kernel_crypt_auth_op *kcaop,
++		struct fcrypt *fcr, void __user *arg)
++{
++	int ret=0;
++
++	ret = cipher_fill_caop_from_kcaop(kcaop, fcr);
++	if (unlikely(ret)) {
++		DBUG("cipher_fill_caop_from_kcaop failed\n");
++		return ret;
++	}
++
++	if (unlikely(copy_to_user(arg, &kcaop->caop, sizeof(kcaop->caop)))) {
++		DBUG("copy_to_user failed\n");
++		return -EFAULT;
++	}
++	return 0;
++}
++
++static void cipher_copy_tls_hash(struct scatterlist *dst_sg, int len, void *hash, int hash_len)
++{
++	scatterwalk_map_and_copy(hash, dst_sg, len, hash_len, 1);
++}
++
++static void cipher_read_tls_hash(struct scatterlist *dst_sg, int len, void *hash, int hash_len)
++{
++	scatterwalk_map_and_copy(hash, dst_sg, len - hash_len, hash_len, 0);
++}
++
++static int cipher_pad_record(struct scatterlist *dst_sg, int len, int block_size)
++{
++	uint8_t pad[TLS_MAX_PADDING_SIZE]={0};
++	int pad_size = block_size - (len % block_size);
++
++	memset(pad, pad_size - 1, pad_size);
++
++	scatterwalk_map_and_copy(pad, dst_sg, len, pad_size, 1);
++
++	return pad_size;
++}
++
++static int helper_verify_tls_record_pad(struct scatterlist *dst_sg, int len, int block_size)
++{
++	uint8_t pad[TLS_MAX_PADDING_SIZE]={0};
++	uint8_t pad_size=0;
++	int i=0;
++
++	scatterwalk_map_and_copy(&pad_size, dst_sg, len - 1, 1, 0);
++
++	if (pad_size + 1 > len) {
++		DBUG("Pad size: %d", pad_size);
++		return -EBADMSG;
++	}
++
++	scatterwalk_map_and_copy(pad, dst_sg, len - pad_size - 1, pad_size + 1, 0);
++
++	for (i = 0; i < pad_size; i++)
++		if (pad[i] != pad_size) {
++			DBUG("Pad size: %u, pad: %d", pad_size, pad[i]);
++			return -EBADMSG;
++		}
++
++	return pad_size + 1;
++}
++
++static int cipher_tls_auth_and_crypt(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop,
++		struct scatterlist *auth_sg, uint32_t auth_len,
++		struct scatterlist *dst_sg, uint32_t len)
++{
++	int ret, fail = 0;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	uint8_t vhash[HASH_MAX_RESULT_LEN]={0};
++	uint8_t hash_output[HASH_MAX_RESULT_LEN]={0};
++
++	if (caop->op == COP_ENCRYPT) {
++		if (ses_ptr->hdata.init != 0) {
++			if (auth_len > 0) {
++				ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++						auth_sg, auth_len);
++				if (unlikely(ret)) {
++					DBUG("crypto_helper_dev_hash_update failed\n");
++					return ret;
++				}
++			}
++
++			if (len > 0) {
++				ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++						dst_sg, len);
++				if (unlikely(ret)) {
++					DBUG("crypto_helper_dev_hash_update failed\n");
++					return ret;
++				}
++			}
++
++			ret = crypto_helper_dev_hash_final(&ses_ptr->hdata, hash_output);
++			if (unlikely(ret)) {
++				DBUG("crypto_helper_dev_hash_final failed\n");
++				return ret;
++			}
++
++			cipher_copy_tls_hash(dst_sg, len, hash_output, caop->tag_len);
++			len += caop->tag_len;
++		}
++
++		if (ses_ptr->cdata.init != 0) {
++			if (ses_ptr->cdata.blocksize > 1) {
++				ret = cipher_pad_record(dst_sg, len, ses_ptr->cdata.blocksize);
++				len += ret;
++			}
++
++			ret = crypto_helper_dev_cipher_encrypt(&ses_ptr->cdata,
++					dst_sg, dst_sg, len);
++			if (unlikely(ret)) {
++				DBUG("crypto_helper_dev_cipher_encrypt failed\n");
++				return ret;
++			}
++		}
++	} else {
++		if (ses_ptr->cdata.init != 0) {
++			ret = crypto_helper_dev_cipher_decrypt(&ses_ptr->cdata,
++					dst_sg, dst_sg, len);
++
++			if (unlikely(ret)) {
++				DBUG("crypto_helper_dev_cipher_decrypt failed\n");
++				return ret;
++			}
++
++			if (ses_ptr->cdata.blocksize > 1) {
++				ret = helper_verify_tls_record_pad(dst_sg, len, ses_ptr->cdata.blocksize);
++				if (unlikely(ret < 0)) {
++					DBUG("verify_record_pad failed\n");
++					fail = 1;
++				} else {
++					len -= ret;
++				}
++			}
++		}
++
++		if (ses_ptr->hdata.init != 0) {
++			if (unlikely(caop->tag_len > sizeof(vhash) || caop->tag_len > len)) {
++				DBUG("invalid len\n");
++				return -EINVAL;
++			}
++
++			cipher_read_tls_hash(dst_sg, len, vhash, caop->tag_len);
++			len -= caop->tag_len;
++
++			if (auth_len > 0) {
++				ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++						auth_sg, auth_len);
++				if (unlikely(ret)) {
++					DBUG("error in crypto_helper_dev_hash_update\n");
++					return ret;
++				}
++			}
++
++			if (len > 0) {
++				ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++						dst_sg, len);
++				if (unlikely(ret)) {
++					DBUG("error in crypto_helper_dev_hash_update\n");
++					return ret;
++				}
++			}
++
++			ret = crypto_helper_dev_hash_final(&ses_ptr->hdata, hash_output);
++			if (unlikely(ret)) {
++				DBUG("error in crypto_helper_dev_hash_final\n");
++				return ret;
++			}
++
++			if (memcmp(vhash, hash_output, caop->tag_len) != 0 || fail != 0) {
++				DBUG("mac verify failed\n");
++				return -EBADMSG;
++			}
++		}
++	}
++	kcaop->dst_len = len;
++	return 0;
++}
++
++static int cipher_srtp_auth_and_crypt(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop,
++		struct scatterlist *auth_sg, uint32_t auth_len,
++		struct scatterlist *dst_sg, uint32_t len)
++{
++	int ret=0, fail = 0;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	uint8_t vhash[HASH_MAX_RESULT_LEN]={0};
++	uint8_t hash_output[HASH_MAX_RESULT_LEN]={0};
++
++	if (caop->op == COP_ENCRYPT) {
++		if (ses_ptr->cdata.init != 0) {
++			ret = crypto_helper_dev_cipher_encrypt(&ses_ptr->cdata,
++					dst_sg, dst_sg, len);
++			if (unlikely(ret)) {
++				DBUG(" error in crypto_helper_dev_cipher_encrypt\n");
++				return ret;
++			}
++		}
++
++		if (ses_ptr->hdata.init != 0) {
++			if (auth_len > 0) {
++				ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++						auth_sg, auth_len);
++				if (unlikely(ret)) {
++					DBUG(" error in crypto_helper_dev_hash_update\n");
++					return ret;
++				}
++			}
++
++			ret = crypto_helper_dev_hash_final(&ses_ptr->hdata, hash_output);
++			if (unlikely(ret)) {
++				DBUG("hash final failed\n");
++				return ret;
++			}
++
++			if (unlikely(copy_to_user(caop->tag, hash_output, caop->tag_len)))
++				return -EFAULT;
++		}
++
++	} else {
++		if (ses_ptr->hdata.init != 0) {
++			if (unlikely(caop->tag_len > sizeof(vhash) || caop->tag_len > len)) {
++				DBUG("invalid len\n");
++				return -EINVAL;
++			}
++
++			if (unlikely(copy_from_user(vhash, caop->tag, caop->tag_len)))
++				return -EFAULT;
++
++			ret = crypto_helper_dev_hash_update(&ses_ptr->hdata,
++					auth_sg, auth_len);
++			if (unlikely(ret)) {
++				DBUG("hash_update failed\n");
++				return ret;
++			}
++
++			ret = crypto_helper_dev_hash_final(&ses_ptr->hdata, hash_output);
++			if (unlikely(ret)) {
++				DBUG("hash_final failed\n");
++				return ret;
++			}
++
++			if (memcmp(vhash, hash_output, caop->tag_len) != 0 || fail != 0) {
++				DBUG("MAC verification failed\n");
++				return -EBADMSG;
++			}
++		}
++
++		if (ses_ptr->cdata.init != 0) {
++			ret = crypto_helper_dev_cipher_decrypt(&ses_ptr->cdata,
++					dst_sg, dst_sg, len);
++
++			if (unlikely(ret)) {
++				DBUG("cipher_decrypt failed\n");
++				return ret;
++			}
++		}
++
++	}
++	kcaop->dst_len = len;
++	return 0;
++}
++
++static int
++cipher_auth_and_crypt(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop,
++		struct scatterlist *auth_sg, uint32_t auth_len,
++		struct scatterlist *src_sg,
++		struct scatterlist *dst_sg, uint32_t len)
++{
++	int ret=0;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	int max_tag_len=0;
++
++	max_tag_len = crypto_helper_dev_cipher_get_tag_size(&ses_ptr->cdata);
++	if (unlikely(caop->tag_len > max_tag_len)) {
++		DBUG("invalid data length\n");
++		return -EINVAL;
++	}
++
++	if (caop->tag_len)
++		crypto_helper_dev_cipher_set_tag_size(&ses_ptr->cdata, caop->tag_len);
++	else
++		caop->tag_len = max_tag_len;
++
++	crypto_helper_dev_cipher_auth(&ses_ptr->cdata, auth_sg, auth_len);
++
++	if (caop->op == COP_ENCRYPT) {
++		ret = crypto_helper_dev_cipher_encrypt(&ses_ptr->cdata,
++				src_sg, dst_sg, len);
++		if (unlikely(ret)) {
++			DBUG("cipher encrypt failed\n");
++			return ret;
++		}
++		kcaop->dst_len = len + caop->tag_len;
++		caop->tag = caop->dst + len;
++	} else {
++		ret = crypto_helper_dev_cipher_decrypt(&ses_ptr->cdata,
++				src_sg, dst_sg, len);
++
++		if (unlikely(ret)) {
++			DBUG("cipher decrypt failed\n");
++			return ret;
++		}
++		kcaop->dst_len = len - caop->tag_len;
++		caop->tag = caop->dst + len - caop->tag_len;
++	}
++
++	return 0;
++}
++
++static int cipher_auth_zync_srtp(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop)
++{
++	struct scatterlist *dst_sg=NULL, *auth_sg=NULL;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	int ret=0;
++
++	if (unlikely(ses_ptr->cdata.init != 0 &&
++			(ses_ptr->cdata.stream == 0 || ses_ptr->cdata.aead != 0))) {
++		DBUG("invalid mode\n");
++		return -EINVAL;
++	}
++
++	ret = helper_cipher_get_userbuf_srtp(ses_ptr, kcaop, &auth_sg, &dst_sg);
++	if (unlikely(ret)) {
++		DBUG("error in helper_cipher_get_userbuf_srtp\n");
++		return ret;
++	}
++
++	ret = cipher_srtp_auth_and_crypt(ses_ptr, kcaop, auth_sg, caop->auth_len,
++			dst_sg, caop->len);
++
++	helper_cipher_release_user_pages(ses_ptr);
++
++	return ret;
++}
++
++static int cipher_auth_zync_tls(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop)
++{
++	struct crypt_auth_op *caop = &kcaop->caop;
++	struct scatterlist *dst_sg=NULL, *auth_sg=NULL;
++	unsigned char *auth_buf = NULL;
++	struct scatterlist tmp;
++	int ret=0;
++
++	memset(&tmp,0,sizeof(tmp));
++
++	if (unlikely(caop->auth_len > PAGE_SIZE)) {
++		DBUG("huge data\n");
++		return -EINVAL;
++	}
++
++	auth_buf = (char *)__get_free_page(GFP_KERNEL);
++	if (unlikely(!auth_buf)) {
++		DBUG("error in get_free_page\n");
++		return -ENOMEM;
++	}
++
++	if (caop->auth_src && caop->auth_len > 0) {
++		if (unlikely(copy_from_user(auth_buf, caop->auth_src, caop->auth_len))) {
++			DBUG("error in copy_from_user\n");
++			ret = -EFAULT;
++			goto free_auth_buf;
++		}
++
++		sg_init_one(&tmp, auth_buf, caop->auth_len);
++		auth_sg = &tmp;
++	} else {
++		auth_sg = NULL;
++	}
++
++	ret = helper_cipher_get_userbuf_tls(ses_ptr, kcaop, &dst_sg);
++	if (unlikely(ret)) {
++		DBUG("error in helper_cipher_get_userbuf_tls\n");
++		goto free_auth_buf;
++	}
++
++	ret = cipher_tls_auth_and_crypt(ses_ptr, kcaop, auth_sg, caop->auth_len,
++			dst_sg, caop->len);
++	helper_cipher_release_user_pages(ses_ptr);
++
++free_auth_buf:
++	free_page((unsigned long)auth_buf);
++	return ret;
++}
++
++static int cipher_auth_zync_aead(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop)
++{
++	struct scatterlist *dst_sg=NULL;
++	struct scatterlist *src_sg=NULL;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	unsigned char *auth_buf = NULL;
++	int ret=0;
++	struct scatterlist auth1[2],auth2[2];
++
++	if (unlikely(ses_ptr->cdata.init == 0 ||
++			(ses_ptr->cdata.stream == 0 && ses_ptr->cdata.aead == 0))) {
++		DBUG("invalid cipher\n");
++		return -EINVAL;
++	}
++
++	if (unlikely(caop->auth_len > PAGE_SIZE)) {
++		DBUG("huge data len\n");
++		return -EINVAL;
++	}
++
++	auth_buf = (char *)__get_free_page(GFP_KERNEL);
++	if (unlikely(!auth_buf)) {
++		DBUG("get_free_page error\n");
++		return -ENOMEM;
++	}
++
++	ret = helper_cipher_get_userbuf(ses_ptr, caop->src, caop->len, caop->dst, kcaop->dst_len,
++			kcaop->task, kcaop->mm, &src_sg, &dst_sg);
++	if (unlikely(ret)) {
++		DBUG("helper_cipher_get_userbuf error\n");
++		goto free_auth_buf;
++	}
++
++	if (caop->auth_src && caop->auth_len > 0) {
++		if (unlikely(copy_from_user(auth_buf, caop->auth_src, caop->auth_len))) {
++			DBUG("copy_from_user error\n");
++			ret = -EFAULT;
++			goto free_pages;
++		}
++
++		sg_init_table(auth1, 2);
++		sg_set_buf(auth1, auth_buf, caop->auth_len);
++		sg_chain(auth1, 2, src_sg);
++
++		if (src_sg == dst_sg) {
++			src_sg = auth1;
++			dst_sg = auth1;
++		} else {
++			sg_init_table(auth2, 2);
++			sg_set_buf(auth2, auth_buf, caop->auth_len);
++			sg_chain(auth2, 2, dst_sg);
++			src_sg = auth1;
++			dst_sg = auth2;
++		}
++	}
++
++	ret = cipher_auth_and_crypt(ses_ptr, kcaop, NULL, caop->auth_len,
++			src_sg, dst_sg, caop->len);
++
++free_pages:
++	helper_cipher_release_user_pages(ses_ptr);
++	ses_ptr=NULL;
++
++free_auth_buf:
++	free_page((unsigned long)auth_buf);
++	auth_buf=NULL;
++
++	return ret;
++}
++
++static int
++__cipher_auth_run_zync(struct csession *ses_ptr, struct kernel_crypt_auth_op *kcaop)
++{
++	struct crypt_auth_op *caop = &kcaop->caop;
++	int ret=0;
++
++	if (caop->flags & CRYPTO_OP_FLAG_AEAD_SRTP_TYPE) {
++		ret = cipher_auth_zync_srtp(ses_ptr, kcaop);
++	} else if (caop->flags & CRYPTO_OP_FLAG_AEAD_TLS_TYPE &&
++			ses_ptr->cdata.aead == 0) {
++		ret = cipher_auth_zync_tls(ses_ptr, kcaop);
++	} else if (ses_ptr->cdata.aead) {
++		ret = cipher_auth_zync_aead(ses_ptr, kcaop);
++	} else {
++		ret = -EINVAL;
++	}
++
++	return ret;
++}
++
++int cipher_auth_run(struct fcrypt *fcr, struct kernel_crypt_auth_op *kcaop)
++{
++	struct csession *ses_ptr=NULL;
++	struct crypt_auth_op *caop = &kcaop->caop;
++	int ret=0;
++
++	if (unlikely(caop->op != COP_ENCRYPT && caop->op != COP_DECRYPT)) {
++		DBUG("invalid operation\n");
++		return -EINVAL;
++	}
++
++	ses_ptr = crypto_get_session_by_sid(fcr, caop->ses);
++	if (unlikely(!ses_ptr)) {
++		DBUG("session invalid error\n");
++		return -EINVAL;
++	}
++
++	if (unlikely(ses_ptr->cdata.init == 0)) {
++		DBUG("cipher context init error\n");
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++
++	if (ses_ptr->hdata.init != 0) {
++		ret = crypto_helper_dev_hash_reset(&ses_ptr->hdata);
++		if (unlikely(ret)) {
++			DBUG("error in hash_reset\n");
++			goto out_unlock;
++		}
++	}
++
++	crypto_helper_dev_cipher_set_iv(&ses_ptr->cdata, kcaop->iv,
++			min(ses_ptr->cdata.ivsize, kcaop->ivlen));
++
++	ret = __cipher_auth_run_zync(ses_ptr, kcaop);
++	if (unlikely(ret)) {
++		DBUG("crypto_auth error\n");
++		goto out_unlock;
++	}
++
++	ret = 0;
++
++	crypto_helper_dev_cipher_get_iv(&ses_ptr->cdata, kcaop->iv,
++			min(ses_ptr->cdata.ivsize, kcaop->ivlen));
++
++out_unlock:
++	mutex_unlock(&ses_ptr->sem);
++	return ret;
++}
+diff -Naur linux_old/drivers/crypto/crypto_core/cryptodev.c linux/drivers/crypto/crypto_core/cryptodev.c
+--- linux_old/drivers/crypto/crypto_core/cryptodev.c	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/cryptodev.c	2021-06-20 16:36:26.402813621 +0530
+@@ -0,0 +1,920 @@
++/*	$OpenBSD: cryptodev.c,v 1.52 2002/06/19 07:22:46 deraadt Exp $	*/
++
++/*-
++ * Copyright (c) 2001 Theo de Raadt
++ * Copyright (c) 2002-2006 Sam Leffler, Errno Consulting
++ * Copyright (c) 2014 The FreeBSD Foundation
++ * All rights reserved.
++ *
++ * Portions of this software were developed by John-Mark Gurney
++ * under sponsorship of the FreeBSD Foundation and
++ * Rubicon Communications, LLC (Netgate).
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in the
++ *   documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *   derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * Effort sponsored in part by the Defense Advanced Research Projects
++ * Agency (DARPA) and Air Force Research Laboratory, Air Force
++ * Materiel Command, USAF, under agreement number F30602-01-2-0537.
++ */
++
++#include <crypto/hash.h>
++#include <linux/mm.h>
++#include <linux/highmem.h>
++#include <linux/ioctl.h>
++#include <linux/random.h>
++#include <linux/syscalls.h>
++#include <linux/pagemap.h>
++#include <linux/poll.h>
++#include <linux/uaccess.h>
++#include <linux/scatterlist.h>
++#include <linux/rtnetlink.h>
++#include <crypto/authenc.h>
++#include <linux/sysctl.h>
++#include <linux/version.h>
++#include <crypto/akcipher.h>
++#include "version.h"
++#include "cryptodev.h"
++#include "_cryptodev.h"
++#include "crypto_helper.h"
++
++int crypto_helper_core_loaded=0;
++
++static struct workqueue_struct *crypto_helper_dev_wq;
++
++static int crypto_create_session(struct fcrypt *fcr, struct session_op *sop, int crid)
++{
++	struct csession	*ses_new = NULL, *ses_ptr=NULL;
++	int ret = 0;
++	const char *alg = NULL;
++	const char *hash = NULL;
++	int hmac_mode = 1, stream = 0, aead = 0;
++	keys_k keys;
++	unsigned int keylen=0;
++
++	memset(&keys,0,sizeof(keys));
++	
++	/* magic number for validating the openssl engine */
++	if(sop->magic != DRIVER_MAGIC_NUM)
++	{
++		printk("Invalid Magic Number\n");
++		return -EINVAL;
++	}
++
++	if (!sop->cipher && !sop->mac) {
++		DBUG("cipher/mac is not set\n");
++		return -EINVAL;
++	}
++
++	switch (sop->cipher) {
++	case 0:
++		break;
++	case CRYPTO_DES_CBC:
++		alg = "cbc(des)";
++		break;
++	case CRYPTO_3DES_CBC:
++		alg = "cbc(des3_ede)";
++		break;
++	case CRYPTO_3DES_ECB:
++		alg = "ecb(des3_ede)";
++		break;
++	case CRYPTO_3DES_OFB:
++		alg = "ofb(des3_ede)";
++		break;
++	case CRYPTO_3DES_CTR:
++		alg = "ctr(des3_ede)";
++		break;
++	case CRYPTO_3DES_CFB64:
++		alg = "cfb(des3_ede)";
++		break;
++	case CRYPTO_BLF_CBC:
++		alg = "cbc(blowfish)";
++		break;
++	case CRYPTO_AES_CBC:
++		alg = "cbc(aes)";
++		break;
++	case CRYPTO_AES_ECB:
++		alg = "ecb(aes)";
++		break;
++	case CRYPTO_AES_OFB:
++		alg = "ofb(aes)";
++		break;
++	case CRYPTO_AES_CFB128:
++		alg = "cfb(aes)";
++		break;
++	case CRYPTO_CAMELLIA_CBC:
++		alg = "cbc(camellia)";
++		break;
++	case CRYPTO_AES_CTR:
++		alg = "ctr(aes)";
++		stream = 1;
++		break;
++	case CRYPTO_AES_GCM:
++		alg = "gcm(aes)";
++		stream = 1;
++		aead = 1;
++		break;
++	case CRYPTO_TLS11_AES_CBC_HMAC_SHA1:
++		alg = "tls11(hmac(sha1),cbc(aes))";
++		stream = 0;
++		aead = 1;
++		break;
++	case CRYPTO_TLS12_AES_CBC_HMAC_SHA256:
++		alg = "tls12(hmac(sha256),cbc(aes))";
++		stream = 0;
++		aead = 1;
++		break;
++	case CRYPTO_NULL:
++		alg = "ecb(cipher_null)";
++		stream = 1;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	switch (sop->mac) {
++	case 0:
++		break;
++	case CRYPTO_MD5_HMAC:
++		hash = "hmac(md5)";
++		break;
++	case CRYPTO_RIPEMD160_HMAC:
++		hash = "hmac(rmd160)";
++		break;
++	case CRYPTO_SHA1_HMAC:
++		hash = "hmac(sha1)";
++		break;
++	case CRYPTO_SHA2_224_HMAC:
++		hash = "hmac(sha224)";
++		break;
++
++	case CRYPTO_SHA2_256_HMAC:
++		hash = "hmac(sha256)";
++		break;
++	case CRYPTO_SHA2_384_HMAC:
++		hash = "hmac(sha384)";
++		break;
++	case CRYPTO_SHA2_512_HMAC:
++		hash = "hmac(sha512)";
++		break;
++	case CRYPTO_SHA2_512_224_HMAC:
++		hash = "hmac(sha512_224)";
++		break;
++	case CRYPTO_SHA2_512_256_HMAC:
++		hash = "hmac(sha512_256)";
++		break;
++
++	case CRYPTO_MD5:
++		hash = "md5";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_RIPEMD160:
++		hash = "rmd160";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA1:
++		hash = "sha1";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA2_224:
++		hash = "sha224";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA2_256:
++		hash = "sha256";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA2_384:
++		hash = "sha384";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA2_512:
++		hash = "sha512";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA2_512_224:
++		hash = "sha512_224";
++		hmac_mode = 0;
++		break;
++	case CRYPTO_SHA2_512_256:
++		hash = "sha512_256";
++		hmac_mode = 0;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	ses_new = kzalloc(sizeof(*ses_new), GFP_KERNEL);
++	if (!ses_new)
++	{	DBUG("memory alloca error\n");
++		return -ENOMEM;
++	}
++
++	if (alg) {
++		ret = crypto_helper_dev_get_cipher_keylen(&keylen, sop, aead);
++		if (ret < 0){
++			DBUG("Setting key failed\n");
++			goto session_error;
++		}
++
++		ret = crypto_helper_dev_get_cipher_key(keys.ckey, sop, aead);
++		if (ret < 0)
++		{
++			goto session_error;
++		}
++
++		ret = crypto_helper_dev_cipher_init(&ses_new->cdata, alg, keys.ckey,
++				keylen, stream, aead);
++		if (ret < 0) {
++			ret = -EINVAL;
++			goto session_error;
++		}
++	}
++
++	if (hash && aead == 0) {
++		if (sop->mackeylen > CRYPTO_HMAC_MAX_KEY_LEN){
++			DBUG("Setting key failed\n");
++			ret = -EINVAL;
++			goto session_error;
++		}
++
++		if (sop->mackey && unlikely(copy_from_user(keys.mkey, sop->mackey,
++				sop->mackeylen))) {
++			ret = -EFAULT;
++			goto session_error;
++		}
++
++		ret = crypto_helper_dev_hash_init(&ses_new->hdata, hash, hmac_mode,
++				keys.mkey, sop->mackeylen);
++		if (ret != 0) {
++			ret = -EINVAL;
++			goto session_error;
++		}
++
++		ret = crypto_helper_dev_hash_reset(&ses_new->hdata);
++		if (ret != 0) {
++			goto session_error;
++		}
++	}
++
++	ses_new->alignmask = max(ses_new->cdata.alignmask,
++			ses_new->hdata.alignmask);
++
++	ses_new->array_size = DEFAULT_PREALLOC_PAGES;
++
++	ses_new->pages = kzalloc(ses_new->array_size *
++			sizeof(struct page *), GFP_KERNEL);
++	ses_new->sg = kzalloc(ses_new->array_size *
++			sizeof(struct scatterlist), GFP_KERNEL);
++
++	if (ses_new->sg == NULL || ses_new->pages == NULL) {
++		ret = -ENOMEM;
++		goto session_error;
++	}
++
++	get_random_bytes(&ses_new->sid, sizeof(ses_new->sid));
++	mutex_init(&ses_new->sem);
++	mutex_lock(&fcr->sem);
++
++restart:
++	list_for_each_entry(ses_ptr, &fcr->list, entry) {
++		if (unlikely(ses_new->sid == ses_ptr->sid)) {
++			get_random_bytes(&ses_new->sid, sizeof(ses_new->sid));
++			goto restart;
++		}
++	}
++
++	list_add(&ses_new->entry, &fcr->list);
++	mutex_unlock(&fcr->sem);
++	sop->ses = ses_new->sid;
++
++	return 0;
++
++session_error:
++	crypto_helper_dev_hash_deinit(&ses_new->hdata);
++	crypto_helper_dev_cipher_deinit(&ses_new->cdata);
++	kfree(ses_new->sg);
++	kfree(ses_new->pages);
++	kfree(ses_new);
++	ses_new=NULL;
++	return ret;
++}
++
++static inline void crypto_destroy_session(struct csession *ses_ptr)
++{
++	if (!mutex_trylock(&ses_ptr->sem)) {
++		mutex_lock(&ses_ptr->sem);
++	}
++
++	crypto_helper_dev_cipher_deinit(&ses_ptr->cdata);
++	crypto_helper_dev_hash_deinit(&ses_ptr->hdata);
++
++	kfree(ses_ptr->pages);
++	kfree(ses_ptr->sg);
++	mutex_unlock(&ses_ptr->sem);
++	mutex_destroy(&ses_ptr->sem);
++	kfree(ses_ptr);
++	ses_ptr=NULL;
++
++	return;
++}
++
++static int crypto_finish_session(struct fcrypt *fcr, uint32_t sid)
++{
++	struct csession *tmp=NULL, *ses_ptr=NULL;
++	struct list_head *head=NULL;
++	int ret = 0;
++
++	mutex_lock(&fcr->sem);
++	head = &fcr->list;
++
++	helper_safe_list(ses_ptr, tmp, head, entry) {
++		if (ses_ptr->sid == sid) {
++			list_del(&ses_ptr->entry);
++			crypto_destroy_session(ses_ptr);
++			break;
++		}
++	}
++
++	if (!ses_ptr){
++		DBUG("session id not found\n");
++		ret = -ENOENT;
++	}
++	mutex_unlock(&fcr->sem);
++
++	return ret;
++}
++
++static int crypto_finish_all_sessions(struct fcrypt *fcr)
++{
++	struct csession *tmp=NULL, *ses_ptr=NULL;
++	struct list_head *head=NULL;
++
++	mutex_lock(&fcr->sem);
++
++	head = &fcr->list;
++	helper_safe_list(ses_ptr, tmp, head, entry) {
++		list_del(&ses_ptr->entry);
++		crypto_destroy_session(ses_ptr);
++	}
++	mutex_unlock(&fcr->sem);
++
++	return 0;
++}
++
++struct csession * crypto_get_session_by_sid(struct fcrypt *fcr, uint32_t sid)
++{
++	struct csession *ses_ptr, *retval = NULL;
++
++	if (fcr == NULL)
++	{
++		return NULL;
++	}
++
++	mutex_lock(&fcr->sem);
++	list_for_each_entry(ses_ptr, &fcr->list, entry) {
++		if (ses_ptr->sid == sid) {
++			mutex_lock(&ses_ptr->sem);
++			retval = ses_ptr;
++			break;
++		}
++	}
++	mutex_unlock(&fcr->sem);
++
++	return retval;
++}
++
++static int crypto_copy_hash_state(struct fcrypt *fcr, uint32_t dst_sid, uint32_t src_sid)
++{
++	struct csession *s_ses=NULL, *d_ses=NULL;
++	int ret=0;
++
++	s_ses = crypto_get_session_by_sid(fcr, src_sid);
++	if (s_ses == NULL) {
++		DBUG("session id not found\n");
++		return -ENOENT;
++	}
++
++	d_ses = crypto_get_session_by_sid(fcr, dst_sid);
++	if (d_ses == NULL) {
++		DBUG("session id not found\n");
++		mutex_unlock(&s_ses->sem);
++		return -ENOENT;
++	}
++
++	ret = crypto_helper_dev_hash_copy(&d_ses->hdata, &s_ses->hdata);
++	mutex_unlock(&s_ses->sem);
++	mutex_unlock(&d_ses->sem);
++	return ret;
++}
++
++static void helper_cipher_routine(struct work_struct *work)
++{
++	struct crypt_priv *pcr = container_of(work, struct crypt_priv, cryptask);
++	struct todo_list_item *item=NULL;
++	LIST_HEAD(tmp);
++
++	mutex_lock(&pcr->todo.lock);
++	list_cut_position(&tmp, &pcr->todo.list, pcr->todo.list.prev);
++	mutex_unlock(&pcr->todo.lock);
++
++	list_for_each_entry(item, &tmp, __hook) {
++		item->result = cipher_run(&pcr->fcrypt, &item->kcop);
++		if (item->result)
++		{
++			DBUG("cipher_run failed\n");
++		}
++	}
++
++	mutex_lock(&pcr->done.lock);
++	list_splice_tail(&tmp, &pcr->done.list);
++	mutex_unlock(&pcr->done.lock);
++	wake_up_interruptible(&pcr->user_waiter);
++
++	return;
++}
++
++static int crypto_helper_dev_open(struct inode *inode, struct file *filp)
++{
++	struct todo_list_item *tmp=NULL, *tmp_next=NULL;
++	struct crypt_priv *pcr=NULL;
++	int i=0;
++
++	pcr = kzalloc(sizeof(*pcr), GFP_KERNEL);
++
++	if (!pcr)
++	{
++		DBUG("memory alloc error\n");
++		return -ENOMEM;
++	}
++
++	filp->private_data = pcr;
++
++	mutex_init(&pcr->fcrypt.sem);
++	mutex_init(&pcr->free.lock);
++	mutex_init(&pcr->todo.lock);
++	mutex_init(&pcr->done.lock);
++
++	INIT_LIST_HEAD(&pcr->fcrypt.list);
++	INIT_LIST_HEAD(&pcr->free.list);
++	INIT_LIST_HEAD(&pcr->todo.list);
++	INIT_LIST_HEAD(&pcr->done.list);
++
++	INIT_WORK(&pcr->cryptask, helper_cipher_routine);
++
++	init_waitqueue_head(&pcr->user_waiter);
++
++	for (i = 0; i < DEF_CRYPTO_OP_RINGSIZE; i++) {
++		tmp = kzalloc(sizeof(struct todo_list_item), GFP_KERNEL);
++		if (!tmp)
++		{
++			goto err;
++		}
++		pcr->itemcount++;
++
++		list_add(&tmp->__hook, &pcr->free.list);
++	}
++
++	return 0;
++
++err:
++	helper_safe_list(tmp, tmp_next, &pcr->free.list, __hook) {
++		list_del(&tmp->__hook);
++		kfree(tmp);
++		tmp=NULL;
++	}
++
++	mutex_destroy(&pcr->done.lock);
++	mutex_destroy(&pcr->todo.lock);
++	mutex_destroy(&pcr->free.lock);
++	mutex_destroy(&pcr->fcrypt.sem);
++
++	kfree(pcr);
++	pcr=NULL;
++	filp->private_data = NULL;
++	return -ENOMEM;
++}
++
++static int crypto_helper_dev_release(struct inode *inode, struct file *filp)
++{
++	struct crypt_priv *pcr = filp->private_data;
++	struct todo_list_item *item=NULL, *item_safe=NULL;
++	int items_freed = 0;
++
++	if (!pcr)
++	{
++		return 0;
++	}
++
++	cancel_work_sync(&pcr->cryptask);
++
++	list_splice_tail(&pcr->todo.list, &pcr->free.list);
++	list_splice_tail(&pcr->done.list, &pcr->free.list);
++
++	helper_safe_list(item, item_safe, &pcr->free.list, __hook) {
++		list_del(&item->__hook);
++		kfree(item);
++		item=NULL;
++		items_freed++;
++	}
++
++	if (items_freed != pcr->itemcount) {
++		DBUG("error while free\n");
++	}
++
++	crypto_finish_all_sessions(&pcr->fcrypt);
++
++	mutex_destroy(&pcr->done.lock);
++	mutex_destroy(&pcr->todo.lock);
++	mutex_destroy(&pcr->free.lock);
++	mutex_destroy(&pcr->fcrypt.sem);
++
++	kfree(pcr);
++	pcr=NULL;
++	filp->private_data = NULL;
++
++	return 0;
++}
++
++static int helper_clonefd(struct file *filp)
++{
++	int ret=0;
++	ret = get_unused_fd_flags(0);
++	if (ret >= 0) {
++		get_file(filp);
++		fd_install(ret, filp);
++	}
++
++	return ret;
++}
++
++static int helper_fill_kcop_from_cop(struct kernel_crypt_op *kcop, struct fcrypt *fcr)
++{
++	struct crypt_op *cop = &kcop->cop;
++	struct csession *ses_ptr=NULL;
++	int rc=0;
++
++	ses_ptr = crypto_get_session_by_sid(fcr, cop->ses);
++	if (!ses_ptr) {
++		DBUG("session failed\n");
++		return -EINVAL;
++	}
++
++	kcop->ivlen = cop->iv ? ses_ptr->cdata.ivsize : 0;
++	kcop->digestsize = 0;
++
++	mutex_unlock(&ses_ptr->sem);
++
++	kcop->task = current;
++	kcop->mm = current->mm;
++
++	if (cop->iv) {
++		rc = copy_from_user(kcop->iv, cop->iv, kcop->ivlen);
++		if (unlikely(rc)) {
++			DBUG("copy_from_user failed\n");
++			return -EFAULT;
++		}
++	}
++
++	return 0;
++}
++
++static int helper_fill_cop_from_kcop(struct kernel_crypt_op *kcop, struct fcrypt *fcr)
++{
++	int ret=0;
++
++	if (kcop->digestsize) {
++		ret = copy_to_user(kcop->cop.mac,
++				kcop->hash_output, kcop->digestsize);
++		if (unlikely(ret))
++		{
++			return -EFAULT;
++		}
++	}
++	if (kcop->ivlen && kcop->cop.flags & CRYPTO_OP_FLAG_WRITE_IV) {
++		ret = copy_to_user(kcop->cop.iv,
++				kcop->iv, kcop->ivlen);
++		if (unlikely(ret))
++		{
++			return -EFAULT;
++		}
++	}
++	return 0;
++}
++
++static int helper_cop_from_user(struct kernel_crypt_op *kcop,
++		struct fcrypt *fcr, void __user *arg)
++{
++	if (unlikely(copy_from_user(&kcop->cop, arg, sizeof(kcop->cop))))
++	{
++		return -EFAULT;
++	}
++
++	return helper_fill_kcop_from_cop(kcop, fcr);
++}
++
++static int helper_cipher_k_to_user(struct kernel_crypt_op *kcop,
++		struct fcrypt *fcr, void __user *arg)
++{
++	int ret=0;
++
++	ret = helper_fill_cop_from_kcop(kcop, fcr);
++	if (ret) {
++		DBUG("helper_fill_cop_from_kcop failed\n");
++		return ret;
++	}
++
++	if (copy_to_user(arg, &kcop->cop, sizeof(kcop->cop))) {
++		DBUG("copy_to_user failed\n");
++		return -EFAULT;
++	}
++	return 0;
++}
++
++static inline void helper_crypto_alg_info(struct alg_info *dst, struct crypto_tfm *tfm)
++{
++	int ret=0;
++
++	ret=snprintf(dst->cra_name, sizeof(dst->cra_name),
++			"%s", crypto_tfm_alg_name(tfm));
++	if(ret < 0 || ret >= sizeof(dst->cra_name))
++	{
++		DBUG("Buffer overflow\n");
++		return;
++	}
++
++	ret=snprintf(dst->cra_driver_name, sizeof(dst->cra_name),
++			"%s", crypto_tfm_alg_driver_name(tfm));
++	if(ret < 0 || ret >= sizeof(dst->cra_name))
++	{
++		DBUG("Buffer overflow\n");
++		return;
++	}
++
++	return;
++}
++
++static int helper_get_session_info(struct fcrypt *fcr, struct session_info_op *siop)
++{
++	struct csession *ses_ptr=NULL;
++	struct crypto_tfm *tfm=NULL;
++
++	ses_ptr = crypto_get_session_by_sid(fcr, siop->ses);
++	if (!ses_ptr) {
++		DBUG("session failed\n");
++		return -EINVAL;
++	}
++
++	siop->flags = 0;
++
++	if (ses_ptr->cdata.init) {
++
++		if (ses_ptr->cdata.aead == 0)
++		{
++			tfm = crypto_skcipher_tfm(ses_ptr->cdata.async.s);
++		}
++		else
++		{
++			tfm = crypto_aead_tfm(ses_ptr->cdata.async.as);
++		}
++
++		helper_crypto_alg_info(&siop->cipher_info, tfm);
++		if (tfm->__crt_alg->cra_flags & CRYPTO_ALG_KERN_DRIVER_ONLY)
++		{
++			siop->flags |= SIOP_FLAG_KERNEL_DRIVER_ONLY;
++		}
++	}
++	if (ses_ptr->hdata.init) {
++		tfm = crypto_ahash_tfm(ses_ptr->hdata.async.s);
++		helper_crypto_alg_info(&siop->hash_info, tfm);
++		if (tfm->__crt_alg->cra_flags & CRYPTO_ALG_KERN_DRIVER_ONLY)
++		{
++			siop->flags |= SIOP_FLAG_KERNEL_DRIVER_ONLY;
++		}
++	}
++
++	siop->alignmask = ses_ptr->alignmask;
++	mutex_unlock(&ses_ptr->sem);
++	return 0;
++}
++
++static long
++crypto_helper_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg_)
++{
++	void __user *arg = (void __user *)arg_;
++	int __user *p = arg;
++	struct session_op sop;
++	struct kernel_crypt_op kcop;
++	struct kernel_crypt_auth_op kcaop;
++	struct kernel_crypt_pkop pkop;
++	struct crypt_priv *pcr = filp->private_data;
++	struct fcrypt *fcr=NULL;
++	struct session_info_op siop;
++	struct cphash_op cphop;
++	uint32_t ses=0;
++	int ret=0, fd=-1;
++	int crid=0;
++
++	memset(&cphop,0,sizeof(cphop));
++	memset(&siop,0,sizeof(siop));
++	memset(&kcaop,0,sizeof(kcaop));
++	memset(&kcop,0,sizeof(kcop));
++	memset(&sop,0,sizeof(sop));
++
++	if (unlikely(!pcr))
++	{
++		BUG();
++	}
++
++	fcr = &pcr->fcrypt;
++
++	switch (cmd) {
++	case CIOCASYMFEAT:
++		ses = 0;
++		if (crypto_has_alg("rsa", 0, 0)) {
++			ses |= CRYPTO_RF_MOD_EXP;
++		}
++		if (crypto_has_alg("ecdsa", 0, 0)) {
++			ses |= CRYPTO_RF_ECDSA_SIGN | CRYPTO_RF_ECDSA_VERIFY;
++		}
++		return put_user(ses, p);
++	case CRIOGET:
++		fd = helper_clonefd(filp);
++		ret = put_user(fd, p);
++		if (unlikely(ret)) {
++			ksys_close(fd);
++			return ret;
++		}
++		return ret;
++#define	CIOCGSESSSTR	(cmd == CIOCGSESSION ? "CIOCGSESSION" : "CIOCGSESSION2")
++	case CIOCGSESSION:
++	case CIOCGSESSION2:
++		if (unlikely(copy_from_user(&sop, arg, sizeof(sop))))
++		{
++			return -EFAULT;
++		}
++		/* for future expansion */
++		if (cmd == CIOCGSESSION2) {
++			crid = sop.crid;
++		} else {
++			crid = 0;
++		}
++		ret = crypto_create_session(fcr, &sop,crid);
++		if (unlikely(ret))
++			return ret;
++		ret = copy_to_user(arg, &sop, sizeof(sop));
++		if (unlikely(ret)) {
++			crypto_finish_session(fcr, sop.ses);
++			return -EFAULT;
++		}
++		return ret;
++	case CIOCFSESSION:
++		ret = get_user(ses, (uint32_t __user *)arg);
++		if (unlikely(ret))
++			return ret;
++		ret = crypto_finish_session(fcr, ses);
++		return ret;
++	case CIOCGSESSINFO:
++		if (unlikely(copy_from_user(&siop, arg, sizeof(siop))))
++		{
++			return -EFAULT;
++		}
++		ret = helper_get_session_info(fcr, &siop);
++		if (unlikely(ret))
++			return ret;
++		return copy_to_user(arg, &siop, sizeof(siop));
++	case CIOCCPHASH:
++		if (unlikely(copy_from_user(&cphop, arg, sizeof(cphop))))
++		{
++			return -EFAULT;
++		}
++		return crypto_copy_hash_state(fcr, cphop.dst_ses, cphop.src_ses);
++	case CIOCKEY:
++	case CIOCKEY2:
++		ret = copy_from_user(&pkop.pkop, arg, sizeof(struct crypt_kop));
++		if (ret == 0) {
++			ret = cipher_run_asym(&pkop);
++		}
++		return ret;
++	case CIOCCRYPT:
++		if (unlikely(ret = helper_cop_from_user(&kcop, fcr, arg))) {
++			DBUG("error in helper_cop_from_user\n");
++			return ret;
++		}
++		ret = cipher_run(fcr, &kcop);
++		if (unlikely(ret)) {
++			DBUG("cipher_run failed\n");
++			return ret;
++		}
++		return helper_cipher_k_to_user(&kcop, fcr, arg);
++	case CIOCAUTHCRYPT:
++		if (unlikely(ret = helper_from_user_to_k(&kcaop, fcr, arg))) {
++			DBUG("error in helper_from_user_to_k\n");
++			return ret;
++		}
++		ret = cipher_auth_run(fcr, &kcaop);
++		if (unlikely(ret)) {
++			DBUG("Error in cipher_auth_run");
++			return ret;
++		}
++		return helper_k_to_user(&kcaop, fcr, arg);
++	default:
++		return -EINVAL;
++	}
++}
++
++static unsigned int crypto_helper_dev_poll(struct file *file, poll_table *wait)
++{
++	struct crypt_priv *pcr = file->private_data;
++	unsigned int ret = 0;
++
++	poll_wait(file, &pcr->user_waiter, wait);
++
++	if (!list_empty_careful(&pcr->done.list))
++	{
++		ret |= POLLIN | POLLRDNORM;
++	}
++	if (!list_empty_careful(&pcr->free.list) || pcr->itemcount < MAX_CRYPTO_OP_RINGSIZE)
++	{
++		ret |= POLLOUT | POLLWRNORM;
++	}
++
++	return ret;
++}
++
++static const struct file_operations crypto_helper_dev_fops = {
++		.owner = THIS_MODULE,
++		.open = crypto_helper_dev_open,
++		.release = crypto_helper_dev_release,
++		.unlocked_ioctl = crypto_helper_dev_ioctl,
++		.poll = crypto_helper_dev_poll,
++};
++
++static struct miscdevice crypto_helper_dev = {
++		.minor = MISC_DYNAMIC_MINOR,
++		.name = "enc",
++		.fops = &crypto_helper_dev_fops,
++		.mode = S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH,
++};
++
++static int __init init_crypto_helper_dev(void)
++{
++	int ret=0;
++
++	crypto_helper_dev_wq = create_workqueue("crypto_helper_dev_queue");
++	if (unlikely(!crypto_helper_dev_wq)) {
++		DBUG("failed to allocate the crypto_helper_dev workqueue\n");
++		return -EFAULT;
++	}
++
++	ret = misc_register(&crypto_helper_dev);
++	if (unlikely(ret)) {
++		destroy_workqueue(crypto_helper_dev_wq);
++		DBUG("registration of /dev/enc failed\n");
++		return ret;
++	}
++
++	crypto_helper_core_loaded=1;
++	printk("crypto core %s driver loaded.\n", VERSION);
++
++	return 0;
++}
++
++static void __exit exit_crypto_helper_dev(void)
++{
++	flush_workqueue(crypto_helper_dev_wq);
++	destroy_workqueue(crypto_helper_dev_wq);
++
++	misc_deregister(&crypto_helper_dev);
++	crypto_helper_core_loaded=0;
++	printk("crypto core driver unloaded\n");
++}
++
++module_init(init_crypto_helper_dev);
++module_exit(exit_crypto_helper_dev);
++
++EXPORT_SYMBOL(crypto_helper_core_loaded);
++
++MODULE_AUTHOR("ARJUN C R arjuncr@ami.com");
++MODULE_DESCRIPTION("crypto helper driver");
++MODULE_LICENSE("Dual BSD/GPL");
+diff -Naur linux_old/drivers/crypto/crypto_core/_cryptodev.h linux/drivers/crypto/crypto_core/_cryptodev.h
+--- linux_old/drivers/crypto/crypto_core/_cryptodev.h	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/_cryptodev.h	2021-06-20 16:36:26.398813592 +0530
+@@ -0,0 +1,222 @@
++/*
++ * This trivial work is released to the public domain, or licensed under the
++ * terms of the CC0, at your option.
++ * $FreeBSD$
++ */
++#ifndef ___CRYPTODEV_H
++#define ___CRYPTODEV_H
++
++#include <linux/version.h>
++#include <linux/init.h>
++#include <linux/sched.h>
++#include <linux/fs.h>
++#include <linux/file.h>
++#include <linux/fdtable.h>
++#include <linux/miscdevice.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/scatterlist.h>
++#include <crypto/aead.h>
++#include <crypto/internal/rsa.h>
++#include <crypto/skcipher.h>
++#include <linux/asn1_ber_bytecode.h>
++#include "cryptodev.h"
++#include "crypto_helper.h"
++
++#define DEFAULT_PREALLOC_PAGES 32
++#define IV_MAX_BLOCK_LEN	16
++#define HASH_MAX_RESULT_LEN		64
++#define CRYPTO_HMAC_MAX_KEY_LEN		512
++#define CRYPTO_CIPHER_MAX_KEY_LEN	64
++#define DEF_CRYPTO_OP_RINGSIZE 16
++#define MAX_CRYPTO_OP_RINGSIZE 64
++#define TLS_MAX_PADDING_SIZE 256
++#define MAX_SRTP_AUTH_DATA_DIFF 256
++#define PAGEOFFSET(buf) ((unsigned long)buf & ~PAGE_MASK)
++
++#define FILL_SG(sg, ptr, len)					\
++		do {							\
++			(sg)->page = virt_to_page(ptr);			\
++			(sg)->offset = offset_in_page(ptr);		\
++			(sg)->length = len;				\
++			(sg)->dma_address = 0;				\
++		} while (0)
++
++struct fcrypt {
++	struct list_head list;
++	struct mutex sem;
++};
++
++struct kernel_crypt_op {
++	struct crypt_op cop;
++	int ivlen;
++	__u8 iv[IV_MAX_BLOCK_LEN];
++	int digestsize;
++	uint8_t hash_output[HASH_MAX_RESULT_LEN];
++	struct task_struct *task;
++	struct mm_struct *mm;
++};
++
++struct kernel_crypt_auth_op {
++	struct crypt_auth_op caop;
++	int dst_len;
++	int ivlen;
++	__u8 iv[IV_MAX_BLOCK_LEN];
++	struct task_struct *task;
++	struct mm_struct *mm;
++};
++
++struct kernel_crypt_pkop {
++	struct crypt_kop pkop;
++	struct crypto_akcipher *s;
++	struct akcipher_request *req;
++	struct crypto_helper_dev_result result;
++};
++
++struct cipher_data {
++	int init;
++	int blocksize;
++	int aead;
++	int stream;
++	int ivsize;
++	int alignmask;
++	struct {
++		/* block ciphers */
++		struct crypto_skcipher *s;
++		struct skcipher_request *request;
++		/* AEAD ciphers */
++		struct crypto_aead *as;
++		struct aead_request *arequest;
++		struct crypto_helper_dev_result result;
++		uint8_t iv[IV_MAX_BLOCK_LEN];
++	} async;
++};
++
++/* hash_data */
++struct hash_data {
++	int init;
++	int digestsize;
++	int alignmask;
++	struct {
++		struct crypto_ahash *s;
++		struct crypto_helper_dev_result result;
++		struct ahash_request *request;
++	} async;
++};
++
++//csession
++struct csession {
++	struct list_head entry;
++	struct mutex sem;
++	struct cipher_data cdata;
++	struct hash_data hdata;
++	uint32_t sid;
++	uint32_t alignmask;
++	unsigned int array_size;
++	unsigned int used_pages;
++	unsigned int readonly_pages;
++	struct page **pages;
++	struct scatterlist *sg;
++};
++
++struct todo_list_item {
++	struct list_head __hook;
++	struct kernel_crypt_op kcop;
++	int result;
++};
++
++struct locked_list {
++	struct list_head list;
++	struct mutex lock;
++};
++
++struct crypt_priv {
++	struct fcrypt fcrypt;
++	struct locked_list free, todo, done;
++	int itemcount;
++	struct work_struct cryptask;
++	wait_queue_head_t user_waiter;
++};
++
++typedef struct {
++		uint8_t ckey[CRYPTO_CIPHER_MAX_KEY_LEN];
++		uint8_t mkey[CRYPTO_HMAC_MAX_KEY_LEN];
++		uint8_t pad[RTA_SPACE(sizeof(struct crypto_authenc_key_param))];
++} keys_k;
++
++//helper functions
++int crypto_helper_dev_hash_final(struct hash_data *hdata, void *output);
++ssize_t crypto_helper_dev_hash_update(struct hash_data *hdata,struct scatterlist *sg, size_t len);
++int crypto_helper_dev_hash_reset(struct hash_data *hdata);
++void crypto_helper_dev_hash_deinit(struct hash_data *hdata);
++int crypto_helper_dev_hash_init(struct hash_data *hdata, const char *alg_name,int hmac_mode, void *mackey, size_t mackeylen);
++int crypto_helper_dev_hash_copy(struct hash_data *dst, struct hash_data *src);
++int helper_cipher_bn_modexp(struct kernel_crypt_pkop *pkop);
++int crypto_helper_dev_ecdsa(struct kernel_crypt_pkop *pkop);
++int crypto_helper_dev_cipher_init(struct cipher_data *out, const char *alg_name,uint8_t *key, size_t keylen, int stream, int aead);
++void crypto_helper_dev_cipher_deinit(struct cipher_data *cdata);
++int crypto_helper_dev_get_cipher_key(uint8_t *key, struct session_op *sop, int aead);
++int crypto_helper_dev_get_cipher_keylen(unsigned int *keylen, struct session_op *sop,int aead);
++ssize_t crypto_helper_dev_cipher_decrypt(struct cipher_data *cdata,const struct scatterlist *sg1,struct scatterlist *sg2, size_t len);
++ssize_t crypto_helper_dev_cipher_encrypt(struct cipher_data *cdata,const struct scatterlist *sg1,struct scatterlist *sg2, size_t len);
++
++int cipher_run_asym(struct kernel_crypt_pkop *pkop);
++int helper_from_user_to_k(struct kernel_crypt_auth_op *kcop,struct fcrypt *fcr, void __user *arg);
++int helper_k_to_user(struct kernel_crypt_auth_op *kcaop,struct fcrypt *fcr, void __user *arg);
++int cipher_auth_run(struct fcrypt *fcr, struct kernel_crypt_auth_op *kcaop);
++int cipher_run(struct fcrypt *fcr, struct kernel_crypt_op *kcop);
++struct csession *crypto_get_session_by_sid(struct fcrypt *fcr, uint32_t sid);
++int adjust_sg_array(struct csession *ses, int pagecount);
++int __get_userbuf(uint8_t __user *addr, uint32_t len, int write,unsigned int pgcount, struct page **pg, struct scatterlist *sg,struct task_struct *task, struct mm_struct *mm);
++void helper_cipher_release_user_pages(struct csession *ses);
++int helper_cipher_get_userbuf(struct csession *ses,
++		void *__user src, unsigned int src_len,
++		void *__user dst, unsigned int dst_len,
++		struct task_struct *task, struct mm_struct *mm,
++		struct scatterlist **src_sg,
++		struct scatterlist **dst_sg);
++
++int helper_cipher_sg_copy(struct scatterlist *sg_from, struct scatterlist *sg_to, int len);
++struct scatterlist *helper_cipher_sg_advance(struct scatterlist *sg, int consumed);
++
++#define CRYPTO_PAGECOUNT(buf, buflen) ((buflen) \
++		? ((((unsigned long)(buf + buflen - 1)) >> PAGE_SHIFT) - \
++				(((unsigned long)(buf             )) >> PAGE_SHIFT) + 1) \
++				: 0)
++/* AEAD */
++static inline void crypto_helper_dev_cipher_auth(struct cipher_data *cdata,struct scatterlist *sg1, size_t len)
++{
++	aead_request_set_ad(cdata->async.arequest, len);
++}
++
++static inline void crypto_helper_dev_cipher_set_tag_size(struct cipher_data *cdata, int size)
++{
++	if (likely(cdata->aead != 0))
++	{
++		crypto_aead_setauthsize(cdata->async.as, size);
++	}
++}
++
++static inline int crypto_helper_dev_cipher_get_tag_size(struct cipher_data *cdata)
++{
++	if (likely(cdata->init && cdata->aead != 0))
++	{
++		return crypto_aead_authsize(cdata->async.as);
++	}
++	else
++	{
++		return 0;
++	}
++}
++
++static inline void crypto_helper_dev_cipher_set_iv(struct cipher_data *cdata,void *iv, size_t iv_size)
++{
++	memcpy(cdata->async.iv, iv, min(iv_size, sizeof(cdata->async.iv)));
++}
++
++static inline void crypto_helper_dev_cipher_get_iv(struct cipher_data *cdata,void *iv, size_t iv_size)
++{
++	memcpy(iv, cdata->async.iv, min(iv_size, sizeof(cdata->async.iv)));
++}
++
++#endif
+diff -Naur linux_old/drivers/crypto/crypto_core/cryptodev.h linux/drivers/crypto/crypto_core/cryptodev.h
+--- linux_old/drivers/crypto/crypto_core/cryptodev.h	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/cryptodev.h	2021-06-20 16:36:26.402813621 +0530
+@@ -0,0 +1,353 @@
++/*	$FreeBSD$	*/
++/*	$OpenBSD: cryptodev.h,v 1.31 2002/06/11 11:14:29 beck Exp $	*/
++
++/*-
++ * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
++ * Copyright (c) 2002-2006 Sam Leffler, Errno Consulting
++ *
++ * This code was written by Angelos D. Keromytis in Athens, Greece, in
++ * February 2000. Network Security Technologies Inc. (NSTI) kindly
++ * supported the development of this code.
++ *
++ * Copyright (c) 2000 Angelos D. Keromytis
++ *
++ * Permission to use, copy, and modify this software with or without fee
++ * is hereby granted, provided that this entire notice is included in
++ * all source code copies of any software which is or includes a copy or
++ * modification of this software.
++ *
++ * THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR
++ * IMPLIED WARRANTY. IN PARTICULAR, NONE OF THE AUTHORS MAKES ANY
++ * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE
++ * MERCHANTABILITY OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR
++ * PURPOSE.
++ *
++ * Copyright (c) 2001 Theo de Raadt
++ * Copyright (c) 2014 The FreeBSD Foundation
++ * All rights reserved.
++ *
++ * Portions of this software were developed by John-Mark Gurney
++ * under sponsorship of the FreeBSD Foundation and
++ * Rubicon Communications, LLC (Netgate).
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in the
++ *   documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *   derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * Effort sponsored in part by the Defense Advanced Research Projects
++ * Agency (DARPA) and Air Force Research Laboratory, Air Force
++ * Materiel Command, USAF, under agreement number F30602-01-2-0537.
++ *
++ */
++
++#ifndef _CRYPTO_CRYPTO_H_
++#define _CRYPTO_CRYPTO_H_
++
++#include <linux/types.h>
++#include <linux/version.h>
++#ifndef __KERNEL__
++#define __user
++#endif
++
++/*
++ * Return values for cryptodev_probesession methods.
++ */
++#define	CRYPTODEV_PROBE_HARDWARE		(-100)
++#define	CRYPTODEV_PROBE_ACCEL_SOFTWARE		(-200)
++#define	CRYPTODEV_PROBE_SOFTWARE		(-500)
++
++/*
++ * Crypto driver/device flags.  They can set in the crid
++ * parameter when creating a session or submitting a key
++ * op to affect the device/driver assigned.  If neither
++ * of these are specified then the crid is assumed to hold
++ * the driver id of an existing (and suitable) device that
++ * must be used to satisfy the request.
++ */
++#define CRYPTO_FLAG_HARDWARE	0x01000000	/* hardware accelerated */
++#define CRYPTO_FLAG_SOFTWARE	0x02000000	/* software implementation */
++
++#define	CSP_MODE_NONE		0
++#define	CSP_MODE_COMPRESS	1	/* Compression/decompression. */
++#define	CSP_MODE_CIPHER		2	/* Encrypt/decrypt. */
++#define	CSP_MODE_DIGEST		3	/* Compute/verify digest. */
++#define	CSP_MODE_AEAD		4	/* Combined auth/encryption. */
++#define	CSP_MODE_ETA		5	/* IPsec style encrypt-then-auth */
++
++#define	CSP_F_SEPARATE_OUTPUT		0x0001	/* Requests can use separate output */
++#define	CSP_F_SEPARATE_AAD		0x0002	/* Requests can use separate AAD */
++#define CSP_F_ESN			0x0004  /* Requests can use seperate ESN field */ 
++
++#define	CRYPTO_F_CBIMM			0x0010	/* Do callback immediately */
++#define	CRYPTO_F_DONE			0x0020	/* Operation completed */
++#define	CRYPTO_F_CBIFSYNC		0x0040	/* Do CBIMM if op is synchronous */
++#define	CRYPTO_F_ASYNC_ORDERED	0x0100	/* Completions must happen in order */
++#define	CRYPTO_F_IV_SEPARATE	0x0200	/* Use crp_iv[] as IV. */
++
++#define	COP_F_CIPHER_FIRST	0x0001	/* Cipher before MAC. */
++#define	COP_F_BATCH		0x0008	/* Batch op if possible */
++
++enum crypto_buffer_type {
++	CRYPTO_BUF_NONE = 0,
++	CRYPTO_BUF_CONTIG,
++	CRYPTO_BUF_UIO,
++	CRYPTO_BUF_MBUF,
++	CRYPTO_BUF_VMPAGE,
++	CRYPTO_BUF_SINGLE_MBUF,
++	CRYPTO_BUF_LAST = CRYPTO_BUF_SINGLE_MBUF
++};
++
++/* All the supported algorithms
++ */
++enum crypto_helper_dev_crypto_op_t {
++	CRYPTO_DES_CBC = 1,
++	CRYPTO_3DES_CBC = 2,
++	CRYPTO_BLF_CBC = 3,
++	CRYPTO_CAST_CBC = 4,
++	CRYPTO_SKIPJACK_CBC = 5,
++	CRYPTO_MD5_HMAC = 6,
++	CRYPTO_SHA1_HMAC = 7,
++	CRYPTO_RIPEMD160_HMAC = 8,
++	CRYPTO_MD5_KPDK = 9,
++	CRYPTO_SHA1_KPDK = 10,
++	CRYPTO_RIJNDAEL128_CBC = 11,
++	CRYPTO_AES_CBC = CRYPTO_RIJNDAEL128_CBC,
++	CRYPTO_ARC4 = 12,
++	CRYPTO_MD5 = 13,
++	CRYPTO_SHA1 = 14,
++	CRYPTO_DEFLATE_COMP = 15,
++	CRYPTO_NULL = 16,
++	CRYPTO_LZS_COMP = 17,
++	CRYPTO_SHA2_256_HMAC = 18,
++	CRYPTO_SHA2_384_HMAC = 19,
++	CRYPTO_SHA2_512_HMAC = 20,
++	CRYPTO_AES_CTR = 21,
++	CRYPTO_AES_XTS = 22,
++	CRYPTO_AES_ECB = 23,
++	CRYPTO_AES_OFB = 24,
++	CRYPTO_AES_CFB128 = 27,
++	CRYPTO_AES_GCM = 50,
++	CRYPTO_3DES_CTR,
++	CRYPTO_3DES_ECB,
++	CRYPTO_3DES_OFB,
++	CRYPTO_3DES_CFB64,
++
++	CRYPTO_CAMELLIA_CBC = 101,
++	CRYPTO_RIPEMD160,
++	CRYPTO_SHA2_224,
++	CRYPTO_SHA2_256,
++	CRYPTO_SHA2_384,
++	CRYPTO_SHA2_512,
++	CRYPTO_SHA2_224_HMAC,
++	CRYPTO_SHA2_512_224,
++	CRYPTO_SHA2_512_256,
++	CRYPTO_SHA2_512_224_HMAC,
++	CRYPTO_SHA2_512_256_HMAC,
++	CRYPTO_TLS11_AES_CBC_HMAC_SHA1,
++	CRYPTO_TLS12_AES_CBC_HMAC_SHA256,
++	CRYPTO_ALGORITHM_ALL,
++};
++
++enum crypto_helper_dev_ecc_curve {
++	CRYPTO_ECC_CURVE_NIST_P192 = 1,
++	CRYPTO_ECC_CURVE_NIST_P224 = 2,
++	CRYPTO_ECC_CURVE_NIST_P256 = 3,
++	CRYPTO_ECC_CURVE_NIST_P384 = 4,
++	CRYPTO_ECC_CURVE_NIST_P521 = 5,
++};
++
++#define	CRYPTO_ALGORITHM_MAX	(CRYPTO_ALGORITHM_ALL - 1)
++
++/*
++ * session and crypt _op structs are used by userspace programs to interact
++ * with /dev/crypto.  Confusingly, the internal kernel interface is named
++ * "cryptop" (no underscore).
++ */
++struct session2_op {
++	__u32	cipher;		/* ie. CRYPTO_AES_CBC */
++	__u32	mac;		/* ie. CRYPTO_SHA2_256_HMAC */
++
++	__u32	keylen;		/* cipher key */
++	const void	*key;
++	int		mackeylen;	/* mac key */
++	const void	*mackey;
++
++	__u32	ses;		/* returns: session # */ 
++	int		crid;		/* driver id + flags (rw) */
++	int		pad[4];		/* for future expansion */
++};
++
++struct session_op {
++	__u32	cipher;/* ie. CRYPTO_AES_CBC */
++	__u32	mac;/* ie. CRYPTO_SHA2_256_HMAC */
++	__u32	keylen;/* cipher key */
++	__u8	__user *key;
++	__u32	mackeylen;/* mac key */
++	__u8	__user *mackey;
++	__u32	ses;/* returns: session # */ 
++	__u32	magic;/* engine magic/ */
++	int crid;
++};
++
++/*
++ * Parameters for looking up a crypto driver/device by
++ * device name or by id.  The latter are returned for
++ * created sessions (crid) and completed key operations.
++ */
++struct crypt_find_op {
++	int		crid;		/* driver id + flags */
++	char	name[32];	/* device/driver name */
++};
++
++struct session_info_op {
++	__u32 ses;
++	struct alg_info {
++		char cra_name[64];
++		char cra_driver_name[64];
++	} cipher_info, hash_info;
++	__u16	alignmask;
++	__u32   flags;
++};
++
++#define SIOP_FLAG_KERNEL_DRIVER_ONLY 1
++#define	COP_ENCRYPT	0
++#define COP_DECRYPT	1
++
++struct crypt_op {
++	__u32	ses;
++	__u16	op;/* i.e. COP_ENCRYPT */
++	__u16	flags;
++	__u32	len;
++	__u8	__user *src;/* become iov[] inside kernel */
++	__u8	__user *dst;
++	__u8	__user *mac;/* must be big enough for chosen MAC */
++	__u8	__user *iv;
++};
++
++/* op and flags the same as crypt_op */
++struct crypt_aead {
++	__u32	ses;
++	__u16	op;		/* i.e. COP_ENCRYPT */
++	__u16	flags;
++	int		len;
++	int		aadlen;
++	int		ivlen;
++	const void	*src;		/* become iov[] inside kernel */
++	void		*dst;
++	const void	*aad;		/* additional authenticated data */
++	void		*tag;		/* must fit for chosen TAG length */
++	const void	*iv;
++};
++
++struct crypt_auth_op {
++	__u32	ses;/* Session */
++	__u16	op;
++	__u16	flags;
++	__u32	len;
++	__u32	auth_len;
++	__u8	__user *auth_src;
++	__u8	__user *src;
++	__u8	__user *dst;
++	__u8    __user *tag;
++	__u32	tag_len;
++	__u8	__user *iv;
++	__u32   iv_len;
++};
++
++struct cryptostats {
++	__u64	cs_ops;		/* symmetric crypto ops submitted */
++	__u64	cs_errs;	/* symmetric crypto ops that failed */
++	__u64	cs_kops;	/* asymetric/key ops submitted */
++	__u64	cs_kerrs;	/* asymetric/key ops that failed */
++	__u64	cs_intrs;	/* crypto swi thread activations */
++	__u64	cs_rets;	/* crypto return thread activations */
++	__u64	cs_blocks;	/* symmetric op driver block */
++	__u64	cs_kblocks;	/* symmetric op driver block */
++};
++
++#define CRYPTO_OP_FLAG_NONE					(0 << 0)
++#define CRYPTO_OP_FLAG_UPDATE				(1 << 0)
++#define CRYPTO_OP_FLAG_FINAL				(1 << 1)
++#define CRYPTO_OP_FLAG_WRITE_IV				(1 << 2)
++#define CRYPTO_OP_FLAG_NO_ZC				(1 << 3)
++#define CRYPTO_OP_FLAG_AEAD_TLS_TYPE  		(1 << 4)
++#define CRYPTO_OP_FLAG_AEAD_SRTP_TYPE 		(1 << 5)
++#define CRYPTO_OP_FLAG_RESET				(1 << 6) 
++
++struct crparam {
++	__u8	*crp_p;
++	__u32	crp_nbits;
++};
++
++struct crypt_kop {
++	__u32	crk_op;
++	__u32	crk_status;
++	__u16	crk_iparams;
++	__u16	crk_oparams;
++	__u32	crk_pad1;
++	struct crparam	crk_param[8];
++};
++
++enum crypto_helper_dev_crk_op_t {
++	CRK_MOD_EXP = 0,
++	CRK_MOD_EXP_CRT = 1,
++	CRK_DSA_SIGN = 2,
++	CRK_DSA_VERIFY = 3,
++	CRK_DH_COMPUTE_KEY = 4,
++	CRK_ECDSA_SIGN = 5,
++	CRK_ECDSA_VERIFY = 6,
++	CRK_ALGORITHM_ALL
++};
++
++struct cphash_op {
++	__u32	dst_ses;
++	__u32	src_ses;
++};
++
++#define CRK_ALGORITHM_MAX			(CRK_ALGORITHM_ALL-1)
++
++#define CRYPTO_RF_MOD_EXP			(1 << CRK_MOD_EXP)
++#define CRYPTO_RF_MOD_EXP_CRT		(1 << CRK_MOD_EXP_CRT)
++#define CRYPTO_RF_DSA_SIGN			(1 << CRK_DSA_SIGN)
++#define CRYPTO_RF_DSA_VERIFY		(1 << CRK_DSA_VERIFY)
++#define CRYPTO_RF_DH_COMPUTE_KEY	(1 << CRK_DH_COMPUTE_KEY)
++#define CRYPTO_RF_ECDSA_SIGN		(1 << CRK_ECDSA_SIGN)
++#define CRYPTO_RF_ECDSA_VERIFY		(1 << CRK_ECDSA_VERIFY)
++
++#define CRIOGET        				_IOWR('c', 101, __u32)
++#define CIOCGSESSION    			_IOWR('c', 102, struct session_op)
++#define CIOCGSESSION2    			_IOWR('c', 103, struct session_op)
++#define CIOCFSESSION   	 			_IOW('c',  104, __u32)
++#define CIOCCRYPT       			_IOWR('c', 105, struct crypt_op)
++#define CIOCKEY         			_IOWR('c', 106, struct crypt_kop)
++#define CIOCKEY2         			_IOWR('c', 107, struct crypt_kop)
++#define CIOCASYMFEAT    			_IOR('c',  108, __u32)
++#define CIOCGSESSINFO				_IOWR('c', 109, struct session_info_op)
++#define CRIOGET_NOT_NEEDED 	 		 1
++#define CIOCAUTHCRYPT   			_IOWR('c', 110, struct crypt_auth_op)
++#define CIOCASYNCCRYPT    			_IOW('c',  111, struct crypt_op)
++#define CIOCASYNCFETCH    			_IOR('c',  112, struct crypt_op)
++#define CIOCCPHASH				_IOW('c',  113, struct cphash_op)
++
++#define DRIVER_MAGIC_NUM		        0xAFDC//magic number
++
++#endif
+diff -Naur linux_old/drivers/crypto/crypto_core/crypto_helper.h linux/drivers/crypto/crypto_core/crypto_helper.h
+--- linux_old/drivers/crypto/crypto_core/crypto_helper.h	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/crypto_helper.h	2021-06-20 16:36:26.402813621 +0530
+@@ -0,0 +1,59 @@
++/*
++ * This trivial work is released to the public domain, or licensed under the
++ * terms of the CC0, at your option.
++ * $FreeBSD$
++ */
++#ifndef _HELPER_H
++#define _HELPER_H
++
++#include <linux/version.h>
++#include "_cryptodev.h"
++#include "cryptodev.h"
++#include <crypto/hash.h>
++#include <linux/mm.h>
++#include <linux/highmem.h>
++#include <linux/ioctl.h>
++#include <linux/random.h>
++#include <linux/syscalls.h>
++#include <linux/pagemap.h>
++#include <linux/poll.h>
++#include <linux/uaccess.h>
++#include <linux/scatterlist.h>
++#include <linux/rtnetlink.h>
++#include <crypto/authenc.h>
++#include <linux/sysctl.h>
++#include <linux/version.h>
++#include <crypto/akcipher.h>
++#include "cryptodev.h"
++#include "_cryptodev.h"
++
++//#define CRYPTO_DEBUG 1
++
++#ifdef CRYPTO_DEBUG
++//#define DBUG(fmt, args...) printk(KERN_DEBUG "%s() " fmt, __FUNCTION__, ## args)
++#define DBUG(fmt, args...) printk("%s() " fmt, __FUNCTION__, ## args)
++#else
++#define DBUG(fmt, args...)
++#endif
++
++#define helper_safe_list(pos, n, head, member)\
++		list_for_each_entry_safe(pos, n, head, member)
++
++struct crypto_helper_dev_result {
++	struct completion completion;
++	int err;
++};
++
++static inline void crypto_helper_dev_complete(struct crypto_async_request *req, int err)
++{
++	struct crypto_helper_dev_result *res = req->data;
++
++	if (err == -EINPROGRESS)
++	{
++		return;
++	}
++
++	res->err = err;
++	complete(&res->completion);
++}
++#endif
+diff -Naur linux_old/drivers/crypto/crypto_core/Kconfig linux/drivers/crypto/crypto_core/Kconfig
+--- linux_old/drivers/crypto/crypto_core/Kconfig	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/Kconfig	2021-06-20 16:36:26.402813621 +0530
+@@ -0,0 +1,5 @@
++config CRYPTO_ENC_DEV
++        tristate "cryptodev (user space support)"
++        depends on CRYPTO
++        help
++          The user space API to access crypto hardware.
+diff -Naur linux_old/drivers/crypto/crypto_core/Makefile linux/drivers/crypto/crypto_core/Makefile
+--- linux_old/drivers/crypto/crypto_core/Makefile	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/Makefile	2021-06-20 16:36:26.398813592 +0530
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_CRYPTO_ENC_DEV) += cryptodev.o crypto.o
+diff -Naur linux_old/drivers/crypto/crypto_core/version.h linux/drivers/crypto/crypto_core/version.h
+--- linux_old/drivers/crypto/crypto_core/version.h	1970-01-01 05:30:00.000000000 +0530
++++ linux/drivers/crypto/crypto_core/version.h	2021-06-20 16:36:26.402813621 +0530
+@@ -0,0 +1,11 @@
++/*
++ * This trivial work is released to the public domain, or licensed under the
++ * terms of the CC0, at your option.
++ * $FreeBSD$
++ */
++#ifndef VERSION_H
++#define VERSION_H
++
++#define VERSION "1.0.0.0"
++
++#endif
+diff -Naur linux_old/drivers/crypto/Kconfig linux/drivers/crypto/Kconfig
+--- linux_old/drivers/crypto/Kconfig	2021-06-20 16:36:03.462646841 +0530
++++ linux/drivers/crypto/Kconfig	2021-06-20 16:37:59.391489625 +0530
+@@ -807,5 +807,6 @@
+ 
+ source "drivers/crypto/hisilicon/Kconfig"
+ source "drivers/crypto/aspeed/Kconfig"
++source "drivers/crypto/crypto_core/Kconfig"
+ 
+ endif # CRYPTO_HW
+diff -Naur linux_old/drivers/crypto/Makefile linux/drivers/crypto/Makefile
+--- linux_old/drivers/crypto/Makefile	2021-06-20 16:36:03.458646811 +0530
++++ linux/drivers/crypto/Makefile	2021-06-20 16:37:21.159211691 +0530
+@@ -49,3 +49,4 @@
+ obj-$(CONFIG_CRYPTO_DEV_SAFEXCEL) += inside-secure/
+ obj-$(CONFIG_CRYPTO_DEV_ARTPEC6) += axis/
+ obj-y += hisilicon/
++obj-$(CONFIG_CRYPTO_ENC_DEV) += crypto_core/

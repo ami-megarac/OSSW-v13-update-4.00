@@ -1,0 +1,214 @@
+diff -Naur linux_old/drivers/i2c/busses/ast2600-i2c-global.c linux/drivers/i2c/busses/ast2600-i2c-global.c
+--- linux_old/drivers/i2c/busses/ast2600-i2c-global.c	2021-10-18 10:42:52.420029000 +0800
++++ linux/drivers/i2c/busses/ast2600-i2c-global.c	2021-10-18 14:40:26.000000000 +0800
+@@ -31,7 +31,7 @@
+ };
+ 
+ static const struct of_device_id aspeed_i2c_ic_of_match[] = {
+-	{ .compatible = "aspeed,ast2600-i2c-global", .data = (void *) 0},	
++	{ .compatible = "aspeed,ast2600-i2c-global", .data = (void *)0},
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, aspeed_i2c_ic_of_match);
+@@ -41,23 +41,17 @@
+ 	unsigned long	base_freq;
+ };
+ 
+-/* assign 4 base clock
+- * [31:24] base clk4 : 1M for 100KHz
+- * [23:16] base clk3 : 4M for 400KHz
+- * [15:08] base clk2 : 10M for 1MHz
+- * [00:07] base clk1 : 35M for 3.4MHz
+- */
+ #define BASE_CLK_COUNT 4
+ 
+ static const struct aspeed_i2c_base_clk i2c_base_clk[BASE_CLK_COUNT] = {
+ 	/* name	target_freq */
+-	{  "base_clk0",	1000000 },	/* 1M */
+-	{  "base_clk1",	4000000 },	/* 4M */
+-	{  "base_clk2",	10000000 },	/* 10M */
+ 	{  "base_clk3",	40000000 },	/* 40M */
++	{  "base_clk2",	10000000 },	/* 10M */
++	{  "base_clk1",	3250000 },	/* 33M */
++	{  "base_clk0",	1000000 },	/* 1M */
+ };
+ 
+-static u32 aspeed_i2c_ic_get_new_clk_divider(unsigned long	base_clk, struct device_node *node)
++static u32 aspeed_i2c_ic_get_new_clk_divider(unsigned long base_clk, struct device_node *node)
+ {
+ 	struct clk_hw_onecell_data *onecell;
+ 	unsigned long base_freq;
+@@ -94,7 +88,7 @@
+ 			 * 0xFF: div 128.5
+ 			 */
+ 			base_freq = base_clk * 2 / (2 + i);
+-			if(base_freq <= i2c_base_clk[j].base_freq)
++			if (base_freq <= i2c_base_clk[j].base_freq)
+ 				break;
+ 		}
+ 		pr_info("i2cg - %s : %ld\n", i2c_base_clk[j].name, base_freq);
+diff -Naur linux_old/drivers/i2c/busses/ast2600-i2c-global.h linux/drivers/i2c/busses/ast2600-i2c-global.h
+--- linux_old/drivers/i2c/busses/ast2600-i2c-global.h	2021-10-18 10:42:52.420029000 +0800
++++ linux/drivers/i2c/busses/ast2600-i2c-global.h	2021-10-18 14:41:06.000000000 +0800
+@@ -1,11 +1,8 @@
+-/* ------------------------------------------------------------------------- */
+-/* ast2600-i2c-global.h          */
+-/* ------------------------------------------------------------------------- */
++/* SPDX-License-Identifier: GPL-2.0-or-later */
+ /*
+- *		Copyright (C) ASPEED Technology Inc.
+- *		Ryan Chen <ryan_chen@aspeedtech.com>
+- * ------------------------------------------------------------------------- */
+-
++ *	Copyright (C) ASPEED Technology Inc.
++ *	Ryan Chen <ryan_chen@aspeedtech.com>
++ */
+ 
+ #ifndef AST2600_I2C_GLOBAL_H
+ #define AST2600_I2C_GLOBAL_H
+@@ -21,7 +18,7 @@
+ /* 0x0C : I2CG SRAM Buffer Enable  */
+ #define ASPEED_I2CG_SRAM_BUFFER_ENABLE		BIT(0)
+ 
+-/*ast2600 */
++/* ast2600 */
+ #define ASPEED_I2CG_SLAVE_PKT_NAK		BIT(4)
+ #define ASPEED_I2CG_M_S_SEPARATE_INTR	BIT(3)
+ #define ASPEED_I2CG_CTRL_NEW_REG		BIT(2)
+diff -Naur linux_old/drivers/i2c/busses/i2c-new-aspeed.c linux/drivers/i2c/busses/i2c-new-aspeed.c
+--- linux_old/drivers/i2c/busses/i2c-new-aspeed.c	2021-10-18 14:29:57.000000000 +0800
++++ linux/drivers/i2c/busses/i2c-new-aspeed.c	2021-10-18 14:38:47.000000000 +0800
+@@ -107,9 +107,6 @@
+ 
+ #define AST_I2CM_RX_DMA_EN			BIT(9)
+ #define AST_I2CM_TX_DMA_EN			BIT(8)
+-#define AST_I2CM_RX_BUFF_EN			BIT(7)
+-#define AST_I2CM_TX_BUFF_EN			BIT(6)
+-
+ /* Command Bit */
+ #define AST_I2CM_RX_BUFF_EN			BIT(7)
+ #define AST_I2CM_TX_BUFF_EN			BIT(6)
+@@ -439,19 +436,20 @@
+ 				(((((clk_div_reg >> 16) & 0xff) + 2) * 10) / 2);
+ 		base_clk4 = (i2c_bus->apb_clk * 10) /
+ 				(((((clk_div_reg >> 24) & 0xff) + 2) * 10) / 2);
+-		if (i2c_bus->bus_frequency <= (base_clk1 / 10)) {
++
++		if ((i2c_bus->apb_clk / i2c_bus->bus_frequency) <= 32) {
++			baseclk_idx = 0;
++			divisor = DIV_ROUND_UP(i2c_bus->apb_clk, i2c_bus->bus_frequency);
++		} else if ((base_clk1 / i2c_bus->bus_frequency) <= 32) {
+ 			baseclk_idx = 1;
+ 			divisor = DIV_ROUND_UP(base_clk1, i2c_bus->bus_frequency);
+-		} else if ((i2c_bus->bus_frequency > (base_clk1 / 10)) &&
+-			   (i2c_bus->bus_frequency <= (base_clk2 / 10))) {
++		} else if ((base_clk2 / i2c_bus->bus_frequency) <= 32) {
+ 			baseclk_idx = 2;
+ 			divisor = DIV_ROUND_UP(base_clk2, i2c_bus->bus_frequency);
+-		} else if ((i2c_bus->bus_frequency > (base_clk2 / 10)) &&
+-			   (i2c_bus->bus_frequency <= (base_clk3 / 10))) {
++		} else if ((base_clk3 / i2c_bus->bus_frequency) <= 32) {
+ 			baseclk_idx = 3;
+-			divisor = DIV_ROUND_UP(base_clk3, i2c_bus->bus_frequency);
+-		} else if ((i2c_bus->bus_frequency > (base_clk3 / 10)) &&
+-			   (i2c_bus->bus_frequency <= (base_clk4 / 10))) {
++			divisor = base_clk3 / i2c_bus->bus_frequency;
++		} else {
+ 			baseclk_idx = 4;
+ 			divisor = DIV_ROUND_UP(base_clk4, i2c_bus->bus_frequency);
+ 			inc = 0;
+@@ -461,15 +459,12 @@
+ 				baseclk_idx++;
+ 			}
+ 			divisor += inc;
+-		} else {
+-			baseclk_idx = 0;
+-			divisor = DIV_ROUND_UP(i2c_bus->apb_clk, i2c_bus->bus_frequency);
+ 		}
+ 		baseclk_idx &= 0xf;
+ 		scl_low = ((divisor >> 1) - 1) & 0xf;
+ 		scl_high = (divisor - scl_low - 2) & 0xf;
+ 		/* Divisor : Base Clock : tCKHighMin : tCK High : tCK Low  */
+-		data = ((scl_high - 1) << 20) | (scl_high << 16) | (scl_low << 12) | (baseclk_idx);
++		data = ((scl_high) << 20) | (scl_high << 16) | (scl_low << 12) | (baseclk_idx);
+ 	} else {
+ 		for (i = 0; i < ARRAY_SIZE(aspeed_old_i2c_timing_table); i++) {
+ 			if ((i2c_bus->apb_clk / aspeed_old_i2c_timing_table[i].divisor) <
+@@ -527,6 +522,7 @@
+ 	}
+ 
+ 	writel(ctrl, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++#ifdef CONFIG_I2C_SLAVE
+ 	if (ctrl & AST_I2CC_SLAVE_EN) {
+ 		u32 cmd = SLAVE_TRIGGER_CMD;
+ 
+@@ -545,7 +541,7 @@
+ 		}
+ 		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+ 	}
+-
++#endif
+ 	return ret;
+ }
+ 
+@@ -559,7 +555,7 @@
+ 	int i = 0;
+ 
+ 	sts &= ~(AST_I2CS_PKT_DONE | AST_I2CS_PKT_ERROR);
+-	writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);
++
+ 	switch (sts) {
+ 	case 0:
+ 		cmd = SLAVE_TRIGGER_CMD;
+@@ -782,6 +778,8 @@
+ 			readl(i2c_bus->reg_base + AST_I2CS_ISR));
+ 		break;
+ 	}
++
++	writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);	
+ }
+ 
+ static void aspeed_i2c_slave_byte_irq(struct aspeed_new_i2c_bus *i2c_bus, u32 sts)
+@@ -1034,7 +1032,9 @@
+ 	switch (sts) {
+ 	case AST_I2CM_PKT_ERROR:
+ 		dev_dbg(i2c_bus->dev, "M : ERROR only\n");
+-		fallthrough;
++		i2c_bus->cmd_err = -EAGAIN;
++		complete(&i2c_bus->cmd_complete);
++		break;
+ 	case AST_I2CM_PKT_ERROR | AST_I2CM_TX_NAK: /* a0 fix for issue */
+ 		fallthrough;
+ 	case AST_I2CM_PKT_ERROR | AST_I2CM_TX_NAK | AST_I2CM_NORMAL_STOP:
+@@ -1333,8 +1333,7 @@
+ 	timeout = wait_for_completion_timeout(&i2c_bus->cmd_complete, i2c_bus->adap.timeout);
+ 	if (timeout == 0) {
+ 		int isr = readl(i2c_bus->reg_base + AST_I2CM_ISR);
+-
+-		dev_dbg(i2c_bus->dev, "timeout\n");
++		dev_dbg(i2c_bus->dev, "timeout isr[%x]\n", isr);
+ 		if (isr) {
+ 			dev_dbg(i2c_bus->dev, "recovery situation isr %x\n", isr);
+ 			aspeed_new_i2c_recover_bus(i2c_bus);
+@@ -1608,10 +1607,6 @@
+ 	if (ret < 0)
+ 		goto unmap;
+ 
+-	ret = i2c_add_adapter(&i2c_bus->adap);
+-	if (ret < 0)
+-		goto free_irq;
+-
+ 	if (of_property_read_bool(pdev->dev.of_node, "smbus-alert")) {
+ 		i2c_bus->alert_enable = 1;
+ 		i2c_bus->ara = i2c_setup_smbus_alert(&i2c_bus->adap, &i2c_bus->alert_data);
+@@ -1626,6 +1621,10 @@
+ 		writel(AST_I2CM_PKT_DONE | AST_I2CM_BUS_RECOVER, i2c_bus->reg_base + AST_I2CM_IER);
+ 	}
+ 
++	ret = i2c_add_adapter(&i2c_bus->adap);
++	if (ret < 0)
++		goto free_irq;
++
+ 	dev_info(i2c_bus->dev, "NEW-I2C: %s [%d]: adapter [%d khz] mode [%d]\n",
+ 		 pdev->dev.of_node->name, i2c_bus->adap.nr, i2c_bus->bus_frequency / 1000,
+ 		 i2c_bus->mode);

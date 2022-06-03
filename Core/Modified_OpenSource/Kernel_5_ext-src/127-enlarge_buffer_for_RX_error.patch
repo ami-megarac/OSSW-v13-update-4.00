@@ -1,0 +1,14 @@
+diff -Naru linux_origin/drivers/net/ethernet/faraday/ftgmac100.c linux/drivers/net/ethernet/faraday/ftgmac100.c
+--- linux_origin/drivers/net/ethernet/faraday/ftgmac100.c	2022-02-17 10:49:13.284456285 +0800
++++ linux/drivers/net/ethernet/faraday/ftgmac100.c	2022-02-17 10:52:10.109802164 +0800
+@@ -39,8 +39,8 @@
+ #define MIN_TX_QUEUE_ENTRIES	32
+ 
+ /* Defaults */
+-#define DEF_RX_QUEUE_ENTRIES	128
+-#define DEF_TX_QUEUE_ENTRIES	128
++#define DEF_RX_QUEUE_ENTRIES	1024
++#define DEF_TX_QUEUE_ENTRIES	1024
+ 
+ #define MAX_PKT_SIZE		1536
+ #define RX_BUF_SIZE		MAX_PKT_SIZE	/* must be smaller than 0x3fff */

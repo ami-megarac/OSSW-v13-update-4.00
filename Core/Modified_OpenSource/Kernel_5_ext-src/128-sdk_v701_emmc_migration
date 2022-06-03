@@ -1,0 +1,11 @@
+--- linux_curr/arch/arm/boot/dts/aspeed-ast2600-evb.dts	2022-02-16 14:27:34.460320444 -0500
++++ linux/arch/arm/boot/dts/aspeed-ast2600-evb.dts	2022-02-16 10:54:36.986855332 -0500
+@@ -77,7 +77,7 @@
+ 
+ &emmc_controller {
+ 	status = "okay";
+-	timing-phase = <0x300FF>;
++	timing-phase = <0x000f0097>;
+ };
+ 
+ &rtc {

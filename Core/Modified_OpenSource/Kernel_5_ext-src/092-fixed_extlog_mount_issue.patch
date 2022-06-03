@@ -1,0 +1,35 @@
+diff -Naur linux_orig/drivers/mtd/parsers/spx-fmh.c linux/drivers/mtd/parsers/spx-fmh.c
+--- linux_orig/drivers/mtd/parsers/spx-fmh.c	2021-09-28 08:36:00.289197367 +0530
++++ linux/drivers/mtd/parsers/spx-fmh.c	2021-09-28 08:39:56.602905546 +0530
+@@ -201,6 +201,31 @@
+         PartCount++;
+ #endif	
+ #endif
++#if defined (CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT) && defined (CONFIG_SPX_FEATURE_COMMON_EXTLOG_SECTION)
++        printk("Creating Partition for extlog \n");
++        /* Fill the parition information */
++        parts[PartCount].name = kstrndup("extlog",16, GFP_KERNEL);
++        if (!parts[PartCount].name)
++		return 0;
++        parts[PartCount].mask_flags = 0;
++	parts[PartCount].types = 0;
++	parts[PartCount].of_node = 0;
++	parts[PartCount].size = CONFIG_SPX_FEATURE_GLOBAL_EXTLOG_SIZE;
++	parts[PartCount].offset = (CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE * 2) + (CONFIG_SPX_FEATURE_GLOBAL_CONF_SIZE * 2);
++	PartCount++;
++#ifdef CONFIG_SPX_FEATURE_GLOBAL_FAILSAFEEXTLOG	
++        printk("Creating Partition for duplicate extlog \n");
++	parts[PartCount].name = kstrndup("extlog",16, GFP_KERNEL);
++        if (!parts[PartCount].name)
++                return 0;
++        parts[PartCount].mask_flags = 0;
++        parts[PartCount].types = 0;
++        parts[PartCount].of_node = 0;
++        parts[PartCount].size = CONFIG_SPX_FEATURE_GLOBAL_EXTLOG_SIZE;
++        parts[PartCount].offset = (CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE * 2) + (CONFIG_SPX_FEATURE_GLOBAL_CONF_SIZE * 2) + CONFIG_SPX_FEATURE_GLOBAL_EXTLOG_SIZE;
++        PartCount++;
++#endif	
++#endif
+ 
+ #if defined (CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT)
+ 		if(scan_flag== 1){

@@ -1,0 +1,360 @@
+diff -ruNa linux/drivers/peci/peci-core.c linux_n/drivers/peci/peci-core.c
+--- linux/drivers/peci/peci-core.c	2022-04-25 01:04:40.989000000 +0800
++++ linux_n/drivers/peci/peci-core.c	2022-04-25 10:29:37.757343000 +0800
+@@ -323,6 +323,13 @@
+ 	 * See PECI Spec Table 3-1.
+ 	 */
+ 	revision = FIELD_GET(REVISION_NUM_MASK, dib);
++	if (revision >= 0x41) { /* Rev. 4.1 */
++		adapter->cmd_mask |= BIT(PECI_CMD_TELEMETRY_DISC);
++		adapter->cmd_mask |= BIT(PECI_CMD_TELEMETRY_GET_TELEM_SAMPLE);
++		adapter->cmd_mask |= BIT(PECI_CMD_TELEMETRY_CONFIG_WATCHER_RD);
++		adapter->cmd_mask |= BIT(PECI_CMD_TELEMETRY_CONFIG_WATCHER_WR);
++		adapter->cmd_mask |= BIT(PECI_CMD_TELEMETRY_GET_CRASHLOG_SAMPLE);
++	}
+ 	if (revision >= 0x40) { /* Rev. 4.0 */
+ 		adapter->cmd_mask |= BIT(PECI_CMD_RD_IA_MSREX);
+ 		adapter->cmd_mask |= BIT(PECI_CMD_RD_END_PT_CFG);
+@@ -417,6 +424,36 @@
+ 
+ 			ret = peci_xfer_with_retries(adapter, msg, true);
+ 			break;
++			case PECI_TELEMETRY_CMD:
++			/*
++			 * WORKAROUND:
++			 * For SPR D0 and earlier, the config watcher write command
++			 * incorrectly assumes that the last byte of data contains
++			 * an AW FCS. For those SPR revisions, the command will fail
++			 * with -EIO as the return.  In that case, we need to replace
++			 * the last byte with an AW FCS and try again for the command
++			 * to succeed.
++			 */
++			ret = peci_xfer_with_retries(adapter, msg, false);
++			if (msg->tx_buf[3] ==
++				    PECI_TELEMETRY_CONFIG_WATCHER_OPCODE &&
++			    msg->tx_buf[4] ==
++			    PECI_TELEMETRY_CONFIG_WATCHER_WR_PARAM &&
++			    ret == -EIO) {
++				u8 aw_fcs;
++				dev_dbg(&adapter->dev,
++					"Raw ConfigWatcher write attempt failed (%d). Replacing last byte of data with AW FCS to try again.\n",
++					ret);
++				ret = peci_aw_fcs(msg, 2 + msg->tx_len,
++						  &aw_fcs);
++				if (!ret) {
++				msg->tx_buf[msg->tx_len - 1] =
++						0x80 ^ aw_fcs;
++					ret = peci_xfer_with_retries(adapter,
++								     msg, true);
++				}
++			}
++			break;
+ 		default:
+ 			ret = peci_xfer_with_retries(adapter, msg, false);
+ 			break;
+@@ -1199,7 +1236,186 @@
+ 
+ 	return ret;
+ }
++static int peci_cmd_telemetry_disc(struct peci_adapter *adapter, void *vmsg)
++{
++	struct peci_telemetry_disc_msg *umsg = vmsg;
++	struct peci_xfer_msg *msg;
++	int ret;
++
++	msg = peci_get_xfer_msg(PECI_TELEMETRY_DISC_WRITE_LEN,
++				PECI_TELEMETRY_DISC_READ_LEN_BASE +
++				umsg->rx_len);
++	if (!msg)
++		return -ENOMEM;
++
++	msg->addr = umsg->addr;
++	msg->tx_buf[0] = PECI_TELEMETRY_CMD;
++	msg->tx_buf[1] = 0x00;        /* request byte for Host ID | Retry bit */
++				      /* Host ID is 0 for PECI 3.0 */
++	msg->tx_buf[2] = PECI_TELEMETRY_DISC_VERSION;
++	msg->tx_buf[3] = PECI_TELEMETRY_DISC_OPCODE;
++	msg->tx_buf[4] = umsg->subopcode;
++	msg->tx_buf[5] = umsg->param0;
++	msg->tx_buf[6] = (u8)umsg->param1;
++	msg->tx_buf[7] = (u8)(umsg->param1 >> 8);
++	msg->tx_buf[8] = umsg->param2;
++
++	ret = peci_xfer_with_retries(adapter, msg, false);
++	if (!ret)
++		memcpy(umsg->data, &msg->rx_buf[1], umsg->rx_len);
++	umsg->cc = msg->rx_buf[0];
++	peci_put_xfer_msg(msg);
++
++	return ret;
++}
++
++static int peci_cmd_telemetry_get_telem_sample(struct peci_adapter *adapter, void *vmsg)
++{
++	struct peci_telemetry_get_telem_sample_msg *umsg = vmsg;
++	struct peci_xfer_msg *msg;
++	int ret;
++
++	msg = peci_get_xfer_msg(PECI_TELEMETRY_GET_TELEM_SAMPLE_WRITE_LEN,
++				PECI_TELEMETRY_GET_TELEM_SAMPLE_READ_LEN);
++	if (!msg)
++		return -ENOMEM;
++
++	msg->addr = umsg->addr;
++	msg->tx_buf[0] = PECI_TELEMETRY_CMD;
++	msg->tx_buf[1] = 0x00;        /* request byte for Host ID | Retry bit */
++				      /* Host ID is 0 for PECI 3.0 */
++	msg->tx_buf[2] = PECI_TELEMETRY_GET_TELEM_SAMPLE_VERSION;
++	msg->tx_buf[3] = PECI_TELEMETRY_GET_TELEM_SAMPLE_OPCODE;
++	msg->tx_buf[4] = (u8)umsg->index;
++	msg->tx_buf[5] = (u8)(umsg->index >> 8);
++	msg->tx_buf[6] = (u8)umsg->sample;
++	msg->tx_buf[7] = (u8)(umsg->sample >> 8);
++
++	ret = peci_xfer_with_retries(adapter, msg, false);
++	if (!ret)
++		memcpy(umsg->data, &msg->rx_buf[1], 8);
++
++	umsg->cc = msg->rx_buf[0];
++	peci_put_xfer_msg(msg);
++
++	return ret;
++}
+ 
++static int peci_cmd_telemetry_config_watcher_rd(struct peci_adapter *adapter, void *vmsg)
++{
++	struct peci_telemetry_config_watcher_msg *umsg = vmsg;
++	struct peci_xfer_msg *msg;
++	int ret;
++
++	msg = peci_get_xfer_msg(PECI_TELEMETRY_CONFIG_WATCHER_RD_WRITE_LEN,
++				PECI_TELEMETRY_CONFIG_WATCHER_RD_READ_LEN);
++	if (!msg)
++		return -ENOMEM;
++
++	msg->addr = umsg->addr;
++	msg->tx_buf[0] = PECI_TELEMETRY_CMD;
++	msg->tx_buf[1] = 0x00;        /* request byte for Host ID | Retry bit */
++				      /* Host ID is 0 for PECI 3.0 */
++	msg->tx_buf[2] = PECI_TELEMETRY_CONFIG_WATCHER_VERSION;
++	msg->tx_buf[3] = PECI_TELEMETRY_CONFIG_WATCHER_OPCODE;
++	msg->tx_buf[4] = PECI_TELEMETRY_CONFIG_WATCHER_RD_PARAM;
++	msg->tx_buf[5] = (u8)umsg->watcher;
++	msg->tx_buf[6] = (u8)(umsg->watcher >> 8);
++	msg->tx_buf[7] = (u8)umsg->offset;
++	msg->tx_buf[8] = (u8)(umsg->offset >> 8);
++
++	ret = peci_xfer_with_retries(adapter, msg, false);
++	if (!ret)
++		memcpy(umsg->data, &msg->rx_buf[1], 8);
++
++	umsg->cc = msg->rx_buf[0];
++	peci_put_xfer_msg(msg);
++
++	return ret;
++}
++
++static int peci_cmd_telemetry_config_watcher_wr(struct peci_adapter *adapter, void *vmsg)
++{
++	struct peci_telemetry_config_watcher_msg *umsg = vmsg;
++	struct peci_xfer_msg *msg;
++	int ret, i;
++
++	msg = peci_get_xfer_msg(PECI_TELEMETRY_CONFIG_WATCHER_WR_WRITE_LEN,
++				PECI_TELEMETRY_CONFIG_WATCHER_WR_READ_LEN);
++	if (!msg)
++		return -ENOMEM;
++
++	msg->addr = umsg->addr;
++	msg->tx_buf[0] = PECI_TELEMETRY_CMD;
++	msg->tx_buf[1] = 0x00;        /* request byte for Host ID | Retry bit */
++				      /* Host ID is 0 for PECI 3.0 */
++	msg->tx_buf[2] = PECI_TELEMETRY_CONFIG_WATCHER_VERSION;
++	msg->tx_buf[3] = PECI_TELEMETRY_CONFIG_WATCHER_OPCODE;
++	msg->tx_buf[4] = PECI_TELEMETRY_CONFIG_WATCHER_WR_PARAM;
++	msg->tx_buf[5] = (u8)umsg->watcher;
++	msg->tx_buf[6] = (u8)(umsg->watcher >> 8);
++	msg->tx_buf[7] = (u8)umsg->offset;
++	msg->tx_buf[8] = (u8)(umsg->offset >> 8);
++	for (i = 0; i < sizeof(umsg->data); i++)
++		msg->tx_buf[9 + i] = umsg->data[i];
++	/*
++	 * WORKAROUND:
++	 * For SPR D0 and earlier, the config watcher write command
++	 * incorrectly assumes that the last byte of data contains
++	 * an AW FCS. For those SPR revisions, the command will fail
++	 * with -EIO as the return.  In that case, we need to replace
++	 * the last byte with an AW FCS and try again for the command
++	 * to succeed.
++	 */
++	ret = peci_xfer_with_retries(adapter, msg, false);
++	if (ret == -EIO) {
++		u8 aw_fcs;
++		dev_dbg(&adapter->dev,
++			"ConfigWatcher write attempt failed (%d). Replacing last byte of data with AW FCS to try again.\n",
++			ret);
++		ret = peci_aw_fcs(msg, 2 + msg->tx_len, &aw_fcs);
++		if (!ret) {
++			msg->tx_buf[msg->tx_len - 1] = 0x80 ^ aw_fcs;
++			ret = peci_xfer_with_retries(adapter, msg, true);
++		}
++	}
++	umsg->cc = msg->rx_buf[0];
++	peci_put_xfer_msg(msg);
++
++	return ret;
++}
++
++static int peci_cmd_telemetry_get_crashlog_sample(struct peci_adapter *adapter, void *vmsg)
++{
++	struct peci_telemetry_get_crashlog_sample_msg *umsg = vmsg;
++	struct peci_xfer_msg *msg;
++	int ret;
++
++	msg = peci_get_xfer_msg(PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_WRITE_LEN,
++				PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_READ_LEN);
++	if (!msg)
++		return -ENOMEM;
++
++	msg->addr = umsg->addr;
++	msg->tx_buf[0] = PECI_TELEMETRY_CMD;
++	msg->tx_buf[1] = 0x00;        /* request byte for Host ID | Retry bit */
++				      /* Host ID is 0 for PECI 3.0 */
++	msg->tx_buf[2] = PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_VERSION;
++	msg->tx_buf[3] = PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_OPCODE;
++	msg->tx_buf[4] = (u8)umsg->index;
++	msg->tx_buf[5] = (u8)(umsg->index >> 8);
++	msg->tx_buf[6] = (u8)umsg->sample;
++	msg->tx_buf[7] = (u8)(umsg->sample >> 8);
++
++	ret = peci_xfer_with_retries(adapter, msg, false);
++	if (!ret)
++		memcpy(umsg->data, &msg->rx_buf[1], 8);
++
++	umsg->cc = msg->rx_buf[0];
++	peci_put_xfer_msg(msg);
++
++	return ret;
++}
+ typedef int (*peci_cmd_fn_type)(struct peci_adapter *, void *);
+ 
+ static const peci_cmd_fn_type peci_cmd_fn[PECI_CMD_MAX] = {
+@@ -1220,6 +1436,11 @@
+ 	peci_cmd_wr_end_pt_cfg,
+ 	peci_cmd_crashdump_disc,
+ 	peci_cmd_crashdump_get_frame,
++	peci_cmd_telemetry_disc,
++	peci_cmd_telemetry_get_telem_sample,
++	peci_cmd_telemetry_config_watcher_rd,
++	peci_cmd_telemetry_config_watcher_wr,
++	peci_cmd_telemetry_get_crashlog_sample,
+ };
+ 
+ /**
+diff -ruNa linux/include/uapi/linux/peci-ioctl.h linux_n/include/uapi/linux/peci-ioctl.h
+--- linux/include/uapi/linux/peci-ioctl.h	2022-04-22 12:38:42.587771000 +0800
++++ linux_n/include/uapi/linux/peci-ioctl.h	2022-04-27 17:05:38.561617967 +0800
+@@ -77,6 +77,11 @@
+ 	PECI_CMD_WR_END_PT_CFG,
+ 	PECI_CMD_CRASHDUMP_DISC,
+ 	PECI_CMD_CRASHDUMP_GET_FRAME,
++	PECI_CMD_TELEMETRY_DISC,
++	PECI_CMD_TELEMETRY_GET_TELEM_SAMPLE,
++	PECI_CMD_TELEMETRY_CONFIG_WATCHER_RD,
++	PECI_CMD_TELEMETRY_CONFIG_WATCHER_WR,
++	PECI_CMD_TELEMETRY_GET_CRASHLOG_SAMPLE,
+ 	PECI_CMD_MAX
+ };
+ 
+@@ -605,6 +610,66 @@
+ 	__u8	data[16];
+ } __attribute__((__packed__));
+ 
++struct peci_telemetry_disc_msg {
++#define PECI_TELEMETRY_DISC_WRITE_LEN		9
++#define PECI_TELEMETRY_DISC_READ_LEN_BASE	1
++#define PECI_TELEMETRY_DISC_VERSION		0
++#define PECI_TELEMETRY_DISC_OPCODE		1
++#define PECI_TELEMETRY_CMD			0x81
++
++	__u8	addr;
++	__u8	subopcode;
++	__u8	cc;
++	__u8	param0;
++	__u16	param1;
++	__u8	param2;
++	__u8	rx_len;
++	__u8	data[10];
++} __attribute__((__packed__));
++
++struct peci_telemetry_get_telem_sample_msg {
++#define PECI_TELEMETRY_GET_TELEM_SAMPLE_WRITE_LEN	8
++#define PECI_TELEMETRY_GET_TELEM_SAMPLE_READ_LEN	9
++#define PECI_TELEMETRY_GET_TELEM_SAMPLE_VERSION	0
++#define PECI_TELEMETRY_GET_TELEM_SAMPLE_OPCODE	2
++
++	__u8	addr;
++	__u8	cc;
++	__u16	index;
++	__u16	sample;
++	__u8	data[8];
++} __attribute__((__packed__));
++
++struct peci_telemetry_config_watcher_msg {
++#define PECI_TELEMETRY_CONFIG_WATCHER_RD_WRITE_LEN	9
++#define PECI_TELEMETRY_CONFIG_WATCHER_RD_READ_LEN	9
++#define PECI_TELEMETRY_CONFIG_WATCHER_WR_WRITE_LEN	17
++#define PECI_TELEMETRY_CONFIG_WATCHER_WR_READ_LEN	1
++#define PECI_TELEMETRY_CONFIG_WATCHER_VERSION		0
++#define PECI_TELEMETRY_CONFIG_WATCHER_OPCODE		3
++#define PECI_TELEMETRY_CONFIG_WATCHER_RD_PARAM		0
++#define PECI_TELEMETRY_CONFIG_WATCHER_WR_PARAM		1
++
++	__u8	addr;
++	__u8	cc;
++	__u16	watcher;
++	__u16	offset;
++	__u8	data[8];
++} __attribute__((__packed__));
++
++struct peci_telemetry_get_crashlog_sample_msg {
++#define PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_WRITE_LEN	8
++#define PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_READ_LEN	9
++#define PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_VERSION	0
++#define PECI_TELEMETRY_GET_CRASHLOG_SAMPLE_OPCODE	12
++
++	__u8	addr;
++	__u8	cc;
++	__u16	index;
++	__u16	sample;
++	__u8	data[8];
++} __attribute__((__packed__));
++
+ #define PECI_IOC_BASE	0xb8
+ 
+ #define PECI_IOC_XFER \
+@@ -663,5 +728,23 @@
+ #define PECI_IOC_CRASHDUMP_GET_FRAME \
+ 	_IOWR(PECI_IOC_BASE, PECI_CMD_CRASHDUMP_GET_FRAME, \
+ 	      struct peci_crashdump_get_frame_msg)
+-
++#define PECI_IOC_TELEMETRY_DISC \
++	_IOWR(PECI_IOC_BASE, PECI_CMD_TELEMETRY_DISC, \
++	      struct peci_telemetry_disc_msg)
++
++#define PECI_IOC_TELEMETRY_GET_TELEM_SAMPLE \
++	_IOWR(PECI_IOC_BASE, PECI_CMD_TELEMETRY_GET_TELEM_SAMPLE, \
++	      struct peci_telemetry_get_telem_sample_msg)
++
++#define PECI_IOC_TELEMETRY_CONFIG_WATCHER_RD \
++	_IOWR(PECI_IOC_BASE, PECI_CMD_TELEMETRY_CONFIG_WATCHER_RD, \
++	      struct peci_telemetry_config_watcher_msg)
++
++#define PECI_IOC_TELEMETRY_CONFIG_WATCHER_WR \
++	_IOWR(PECI_IOC_BASE, PECI_CMD_TELEMETRY_CONFIG_WATCHER_WR, \
++	      struct peci_telemetry_config_watcher_msg)
++
++#define PECI_IOC_TELEMETRY_GET_CRASHLOG_SAMPLE \
++	_IOWR(PECI_IOC_BASE, PECI_CMD_TELEMETRY_GET_CRASHLOG_SAMPLE, \
+++	      struct peci_telemetry_get_crashlog_sample_msg)
+ #endif /* __PECI_IOCTL_H */

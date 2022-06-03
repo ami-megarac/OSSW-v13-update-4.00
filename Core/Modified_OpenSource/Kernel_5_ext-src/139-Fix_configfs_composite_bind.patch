@@ -1,0 +1,13 @@
+diff -Naur linux_old/drivers/usb/gadget/configfs.c linux_new/drivers/usb/gadget/configfs.c
+--- linux_old/drivers/usb/gadget/configfs.c	2022-04-20 14:27:24.503459365 +0800
++++ linux_new/drivers/usb/gadget/configfs.c	2022-04-20 13:44:30.100236030 +0800
+@@ -1547,9 +1547,6 @@
+ 	}
+ 
+ 	usb_ep_autoconfig_reset(cdev->gadget);
+-	if(!cdev->gadget->connected)  {
+-		usb_gadget_vhub_upstream_enalbe(gadget);
+-	}
+ 	return 0;
+ 
+ err_purge_funcs:

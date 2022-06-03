@@ -1,0 +1,24 @@
+--- a/Documentation/devicetree/bindings/gpio/gpio-aspeed.txt	2021-02-17 17:10:46.938021302 +0800
++++ b/Documentation/devicetree/bindings/gpio/gpio-aspeed.txt	2021-06-15 19:45:11.027671522 +0800
+@@ -22,6 +22,11 @@ Optional properties:
+ - ngpios		: Number of GPIOs controlled by this controller. Should	be set
+ 				  when there are multiple GPIO controllers on a SoC (ast2600).
+ 
++Optional subnode properties:
++- ami,debounce-interval	: Debouncing interval time in microseconds. Note that
++			  the number of unique decouncing intervals may be
++			  limited due to hardware limitations.
++
+ The gpio and interrupt properties are further described in their respective
+ bindings documentation:
+ 
+@@ -36,4 +41,9 @@ bindings documentation:
+ 		interrupts = <20>;
+ 		reg = <0x1e780000 0x1000>;
+ 		interrupt-controller;
++
++		some-button {
++			gpios = <ASPEED_GPIO(V, 4) 0>;
++			ami,debounce-interval = <1000>;
++		};
+ 	};

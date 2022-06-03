@@ -1,0 +1,51 @@
+--- linux.orig/drivers/mtd/parsers/spx-fmh.c	2022-03-22 19:14:51.239343938 +0530
++++ linux/drivers/mtd/parsers/spx-fmh.c	2022-03-22 19:21:53.617770035 +0530
+@@ -60,10 +60,13 @@
+ 	unsigned long sec=0;
+ 	unsigned long startingsector=0,endingsector=0,startaddress=0;
+ 
+-#if defined CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK
++#if defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+ 	unsigned long img2_offset=0;
+ 	int i=0;
+ #endif
++#if defined (CONFIG_SPX_FEATURE_SINGLE_SPI_ABR)
++	unsigned long img2_offset=0;
++#endif
+ #if defined (CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT)
+ 	unsigned long startingsector_p=0,endingsector_p=0,startaddress_p=0;
+ 	int scan_flag=1;
+@@ -87,10 +90,14 @@
+     }
+ 
+ #endif
++
++#if defined(CONFIG_SPX_FEATURE_SINGLE_SPI_ABR)
++    	img2_offset+=FlashSize/2;
++#endif
+ 	if(strstr(boot_command_line,IMAGE_1)){
+     	endingsector=(unsigned long)div_u64(CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE,SectorSize);
+ 
+-#if defined CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK
++#if defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK) || defined(CONFIG_SPX_FEATURE_SINGLE_SPI_ABR)
+         startingsector_p=(unsigned long)div_u64(img2_offset,SectorSize);
+         endingsector_p=(unsigned long)div_u64(img2_offset+CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE,SectorSize);
+         startaddress_p=img2_offset;
+@@ -102,7 +109,7 @@
+ #endif  
+ 	}
+ 	else if(strstr(boot_command_line,IMAGE_2)){
+-#if defined CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK
++#if defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK) || defined(CONFIG_SPX_FEATURE_SINGLE_SPI_ABR)
+         startingsector=(unsigned long)div_u64(img2_offset,SectorSize);
+         endingsector=(unsigned long)div_u64(img2_offset+CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE,SectorSize);
+         startaddress=img2_offset;
+@@ -233,7 +240,7 @@
+ 			startingsector=startingsector_p;
+ 			endingsector=endingsector_p;
+ 			startaddress=startaddress_p;
+-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) || defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+ 			if (broken_spi_banks == 0)
+ #endif
+ 			{

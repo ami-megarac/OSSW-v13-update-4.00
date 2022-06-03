@@ -24,7 +24,7 @@
 #define JTAG_MINOR           0
 #define JTAG_MAX_DEVICES     255
 #define JTAG_DEV_NAME        "jtag_altera"
-#define AST_FW_BUFFER_SIZE  0x500000  //5MB
+#define AST_FW_BUFFER_SIZE   (0x210000) //2.1M
 
 static struct cdev *jtag_cdev=NULL;
 
@@ -61,7 +61,7 @@ static long altera_ioctl(struct file *file,unsigned int cmd, unsigned long arg)
 		
 		case IOCTL_JTAG_ERASE_JBC:
     	{
-		    JTAG_write_buffer = kmalloc(Kernal_IO_Data.size, GFP_DMA|GFP_KERNEL);
+		    JTAG_write_buffer = kmalloc(AST_FW_BUFFER_SIZE, GFP_DMA|GFP_KERNEL);
   			if (JTAG_write_buffer == NULL) {
     		 		dbgprintf ("%s: Can't allocate write_buffer\n", JTAG_DEV_NAME);
     		 		ret = -ENOMEM;
@@ -92,7 +92,7 @@ static long altera_ioctl(struct file *file,unsigned int cmd, unsigned long arg)
         }
         case IOCTL_JTAG_VERIFY_JBC:
         {
-			JTAG_write_buffer = kmalloc(Kernal_IO_Data.size, GFP_DMA|GFP_KERNEL);
+			JTAG_write_buffer = kmalloc(AST_FW_BUFFER_SIZE, GFP_DMA|GFP_KERNEL);
   			if (JTAG_write_buffer == NULL) {
     		 		dbgprintf ("%s: Can't allocate write_buffer\n", JTAG_DEV_NAME);
     		 		ret = -ENOMEM;
@@ -123,7 +123,7 @@ static long altera_ioctl(struct file *file,unsigned int cmd, unsigned long arg)
         }
         case IOCTL_JTAG_UPDATE_JBC:
 	    {	
-			JTAG_write_buffer = kmalloc(Kernal_IO_Data.size, GFP_DMA|GFP_KERNEL);
+			JTAG_write_buffer = kmalloc(AST_FW_BUFFER_SIZE, GFP_DMA|GFP_KERNEL);
   			if (JTAG_write_buffer == NULL) {
     		 		dbgprintf ("%s: Can't allocate write_buffer\n", JTAG_DEV_NAME);
     		 		ret = -ENOMEM;

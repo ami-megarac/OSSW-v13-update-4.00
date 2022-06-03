@@ -1,0 +1,82 @@
+diff -Naur linux_org/net/ncsi/internal.h linux/net/ncsi/internal.h
+--- linux_org/net/ncsi/internal.h	2021-12-03 09:39:10.763168000 +0800
++++ linux/net/ncsi/internal.h	2021-12-02 15:50:42.090613000 +0800
+@@ -294,6 +294,7 @@
+ 	ncsi_dev_state_config_ae,
+ 	ncsi_dev_state_config_gls,
+ 	ncsi_dev_state_config_done,
++	ncsi_dev_state_config_dcnt,
+ 	ncsi_dev_state_suspend_select	= 0x0401,
+ 	ncsi_dev_state_suspend_gls,
+ 	ncsi_dev_state_suspend_dcnt,
+diff -Naur linux_org/net/ncsi/ncsi-manage.c linux/net/ncsi/ncsi-manage.c
+--- linux_org/net/ncsi/ncsi-manage.c	2021-12-03 09:39:10.923160000 +0800
++++ linux/net/ncsi/ncsi-manage.c	2021-12-02 20:23:53.456920000 +0800
+@@ -1093,6 +1093,7 @@
+ 	case ncsi_dev_state_config_ebf:
+ 	case ncsi_dev_state_config_dgmf:
+ 	case ncsi_dev_state_config_ecnt:
++	case ncsi_dev_state_config_dcnt:
+ 	case ncsi_dev_state_config_ec:
+ 	case ncsi_dev_state_config_ae:
+ 	case ncsi_dev_state_config_gls:
+@@ -1141,6 +1142,7 @@
+ 			nca.bytes[6] = 0x1;
+ 			nca.bytes[7] = 0x1;
+ 			nd->state = ncsi_dev_state_config_ebf;
++#if 0			
+ 		} else if (nd->state == ncsi_dev_state_config_ebf) {
+ 			nca.type = NCSI_PKT_CMD_EBF;
+ 			nca.dwords[0] = nc->caps[NCSI_CAP_BC].cap;
+@@ -1175,6 +1177,43 @@
+ 			nd->state = ncsi_dev_state_config_ae;
+ 			if (!(nc->caps[NCSI_CAP_AEN].cap & NCSI_CAP_AEN_MASK))
+ 				nd->state = ncsi_dev_state_config_gls;
++#else
++		} else if (nd->state == ncsi_dev_state_config_ebf) {
++					nca.type = NCSI_PKT_CMD_EBF;
++					nca.dwords[0] = nc->caps[NCSI_CAP_BC].cap;
++					/* if multicast global filtering is supported then
++					 * disable it so that all multicast packet will be
++					 * forwarded to management controller
++					 */
++					if (nc->caps[NCSI_CAP_GENERIC].cap & NCSI_CAP_GENERIC_MC)
++						nd->state = ncsi_dev_state_config_dgmf;
++					else 
++						nd->state = ncsi_dev_state_config_ec;
++				} else if (nd->state == ncsi_dev_state_config_dgmf) {
++					nca.type = NCSI_PKT_CMD_DGMF;
++					nd->state = ncsi_dev_state_config_ec;
++				} else if (nd->state == ncsi_dev_state_config_ecnt) {
++					if (np->preferred_channel && nc != np->preferred_channel)
++						netdev_info(ndp->ndev.dev,
++							    "NCSI: Tx failed over to channel %u\n",
++							    nc->id);
++					nca.type = NCSI_PKT_CMD_ECNT;
++					nd->state = ncsi_dev_state_config_ae;					
++					if (!(nc->caps[NCSI_CAP_AEN].cap & NCSI_CAP_AEN_MASK))
++						nd->state = ncsi_dev_state_config_gls;
++				} else if (nd->state == ncsi_dev_state_config_dcnt) {					
++					nca.type = NCSI_PKT_CMD_DCNT;
++					nd->state = ncsi_dev_state_config_ae;					
++					if (!(nc->caps[NCSI_CAP_AEN].cap & NCSI_CAP_AEN_MASK))
++						nd->state = ncsi_dev_state_config_gls;
++				} else if (nd->state == ncsi_dev_state_config_ec) {
++					/* Enable AEN if it's supported */
++					nca.type = NCSI_PKT_CMD_EC;
++					if (ncsi_channel_is_tx(ndp, nc))
++						nd->state = ncsi_dev_state_config_ecnt;
++					else
++						nd->state = ncsi_dev_state_config_dcnt;
++#endif							
+ 		} else if (nd->state == ncsi_dev_state_config_ae) {
+ 			nca.type = NCSI_PKT_CMD_AE;
+ 			nca.bytes[0] = 0;
+@@ -2017,6 +2056,7 @@
+ 		ndp->flags &= ~NCSI_DEV_RESET;
+ 		spin_unlock_irqrestore(&ndp->lock, flags);
+ 		ndp->polling.id = 32;	
++		InitComplete = 0;
+ 		msleep(500);
+ 		return ncsi_choose_active_channel(ndp);
+ 	}

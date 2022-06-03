@@ -664,6 +664,84 @@ int is_valid_authorization(char *qsession, char *csrftoken)
     return 0;
 }
 
+/** @brief Verfied if qsession is valid from a web session
+ * @returns 0 in case of authentication failure
+ *          1 in case of success
+ */
+
+int is_valid_Qsession(char *qsession)
+{   
+    char session_storage_path[PATH_MAX]={0};
+    char line[MAX_LINEBUF] = {0};
+    int tempret = 0;
+    char *delim = ";=";
+    char *substr = NULL;
+
+
+    if(qsession == NULL) {
+        return 0;
+    }
+    char *dupstr = strdup(qsession);
+    if( dupstr == NULL )
+    {
+        return 0;
+    }
+    char *sepstr = dupstr;
+
+    do
+    {
+        if( sepstr != NULL )
+        {
+            substr = strsep(&sepstr, delim);
+            if( substr != NULL )
+            {
+                if (strstr(substr, "QSESSIONID") != NULL) {
+                    substr = strsep(&sepstr, delim);
+                    break;
+                }
+            }
+        }
+    } while (substr);
+
+    tempret = snprintf(session_storage_path, sizeof(session_storage_path),
+            "%s/%s%s%s",
+            SESSION_DEFAULT_REPOSITORY,
+            SESSION_PREFIX,
+            substr,
+            SESSION_STORAGE_EXTENSION);
+    if(tempret < 0 || tempret >= (long)sizeof(session_storage_path)) {
+    	free(dupstr);
+        return 0;
+    }
+
+    FILE *fp = fopen(session_storage_path, "r");
+    if (fp == NULL) {free(dupstr); return 0;}
+
+    while((fgets(line, MAX_LINEBUF, fp)) != NULL) 
+    {
+        if((strstr(line, "_Q_SESSIONID=")) != NULL)
+        {
+            char *val=&line[0], *var;
+            if ((var = strsep(&val, "=")))
+            {
+                _q_strtrim(val);     
+                _q_urldecode(val);
+                if(strcmp(val, substr) == 0) // valid session
+				{
+					free(dupstr);
+					fclose(fp);
+                    return 1;
+				}
+            }
+        }
+    }    
+
+	free(dupstr);
+    fclose(fp);
+    // Qsession not found
+    return 0;
+}
+
 // session not found 0, session expired -1, session valid 1
 static int _is_valid_session(const char *filepath)
 {

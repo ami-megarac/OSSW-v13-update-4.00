@@ -1,0 +1,20 @@
+--- linux.orig/drivers/mtd/concat/mtd-concat.c	2022-04-21 19:24:03.074961000 +0530
++++ linux/drivers/mtd/concat/mtd-concat.c	2022-04-21 19:25:13.349880811 +0530
+@@ -17,7 +17,7 @@
+ #include <linux/slab.h>
+ #include "../mtdcore.h"
+ 
+-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+ extern unsigned char broken_spi_banks;// specify the number of broken SPI flash bank
+ #endif
+ /*
+@@ -110,7 +110,7 @@
+                info->devices[info->num_devices++] = mtd;
+        }
+ 
+-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+        broken_spi_banks=0;
+        if(strstr(boot_command_line,"imagebooted=1")) {
+ 	       if(info->num_devices == 1) {

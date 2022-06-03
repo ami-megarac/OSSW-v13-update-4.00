@@ -1,0 +1,255 @@
+--- linux-5.4.85/drivers/gpu/drm/aspeed/aspeed_gfx_crtc.c	2021-04-15 16:07:59.090639326 +0800
++++ linux-5.4.85-new/drivers/gpu/drm/aspeed/aspeed_gfx_crtc.c	2021-04-23 13:38:03.496575707 +0800
+@@ -60,7 +60,14 @@
+ 	u32 ctrl2 = readl(priv->base + CRT_CTRL2);
+ 
+ 	/* SCU2C: set DAC source for display output to Graphics CRT (GFX) */
+-	regmap_update_bits(priv->scu, 0x2c, BIT(16), BIT(16));
++	if(priv->version == GFX_AST2600)
++	{
++		regmap_update_bits(priv->scu, 0xc0, BIT(16), BIT(16));
++	}
++	else
++	{
++		regmap_update_bits(priv->scu, 0x2c, BIT(16), BIT(16));
++	}
+ 
+ 	writel(ctrl1 | CRT_CTRL_EN, priv->base + CRT_CTRL1);
+ 	writel(ctrl2 | CRT_CTRL_DAC_EN, priv->base + CRT_CTRL2);
+@@ -74,7 +81,10 @@
+ 	writel(ctrl1 & ~CRT_CTRL_EN, priv->base + CRT_CTRL1);
+ 	writel(ctrl2 & ~CRT_CTRL_DAC_EN, priv->base + CRT_CTRL2);
+ 
+-	regmap_update_bits(priv->scu, 0x2c, BIT(16), 0);
++	if(priv->version == GFX_AST2600)
++		regmap_update_bits(priv->scu, 0xc0, BIT(16), 0);
++	else 
++		regmap_update_bits(priv->scu, 0x2c, BIT(16), 0);
+ }
+ 
+ static void aspeed_gfx_crtc_mode_set_nofb(struct aspeed_gfx *priv)
+@@ -127,7 +137,11 @@
+ 	 * Terminal Count: memory size of one scan line
+ 	 */
+ 	d_offset = m->hdisplay * bpp / 8;
+-	t_count = (m->hdisplay * bpp + 127) / 128;
++	if(priv->version == GFX_AST2400)
++		t_count = (m->hdisplay * bpp + 63) / 64;
++	else
++		t_count = (m->hdisplay * bpp + 127) / 128;
++
+ 	writel(CRT_DISP_OFFSET(d_offset) | CRT_TERM_COUNT(t_count),
+ 			priv->base + CRT_OFFSET);
+ 
+@@ -135,7 +149,13 @@
+ 	 * Threshold: FIFO thresholds of refill and stop (16 byte chunks
+ 	 * per line, rounded up)
+ 	 */
+-	writel(G5_CRT_THROD_VAL, priv->base + CRT_THROD);
++	if(priv->version == GFX_AST2600) {
++		writel(G6_CRT_THROD_VAL, priv->base + CRT_THROD);
++	} else if(priv->version == GFX_AST2500) {
++		writel(G5_CRT_THROD_VAL, priv->base + CRT_THROD);
++	} else {
++		writel(CRT_THROD_VAL, priv->base + CRT_THROD);
++	}
+ }
+ 
+ static void aspeed_gfx_pipe_enable(struct drm_simple_display_pipe *pipe,
+--- linux-5.4.85/drivers/gpu/drm/aspeed/aspeed_gfx_drv.c	2021-04-15 16:07:59.094639246 +0800
++++ linux-5.4.85-new/drivers/gpu/drm/aspeed/aspeed_gfx_drv.c	2021-04-23 13:41:56.343208142 +0800
+@@ -7,6 +7,7 @@
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/of_device.h>
+ #include <linux/of_reserved_mem.h>
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+@@ -65,12 +66,21 @@
+ 
+ static void aspeed_gfx_setup_mode_config(struct drm_device *drm)
+ {
+-	drm_mode_config_init(drm);
++	struct aspeed_gfx *priv = drm->dev_private;
+ 
++	drm_mode_config_init(drm);	
++	
+ 	drm->mode_config.min_width = 0;
+ 	drm->mode_config.min_height = 0;
+-	drm->mode_config.max_width = 800;
+-	drm->mode_config.max_height = 600;
++
++	if(priv->version == GFX_AST2600) {
++		drm->mode_config.max_width = 800;
++		drm->mode_config.max_height = 600;
++	} else {
++		drm->mode_config.max_width = 800;
++		drm->mode_config.max_height = 600;
++	}
++
+ 	drm->mode_config.funcs = &aspeed_gfx_mode_config_funcs;
+ }
+ 
+@@ -84,18 +94,26 @@
+ 
+ 	if (reg & CRT_CTRL_VERTICAL_INTR_STS) {
+ 		drm_crtc_handle_vblank(&priv->pipe.crtc);
+-		writel(reg, priv->base + CRT_CTRL1);
++		if(priv->version == GFX_AST2600)
++			writel(CRT_CTRL_VERTICAL_INTR_STS, priv->base + CRT_STATUS);
++		else
++			writel(reg, priv->base + CRT_CTRL1);
+ 		return IRQ_HANDLED;
+ 	}
+ 
+ 	return IRQ_NONE;
+ }
+ 
+-
++static const struct of_device_id aspeed_gfx_match[] = {
++	{ .compatible = "aspeed,ast2500-gfx",  .data = (void *) GFX_AST2500},
++	{ .compatible = "aspeed,ast2600-gfx",  .data = (void *) GFX_AST2600},
++	{ }
++};
+ 
+ static int aspeed_gfx_load(struct drm_device *drm)
+ {
+ 	struct platform_device *pdev = to_platform_device(drm->dev);
++	const struct of_device_id *dev_id;	
+ 	struct aspeed_gfx *priv;
+ 	struct resource *res;
+ 	int ret;
+@@ -110,7 +128,13 @@
+ 	if (IS_ERR(priv->base))
+ 		return PTR_ERR(priv->base);
+ 
+-	priv->scu = syscon_regmap_lookup_by_compatible("aspeed,ast2500-scu");
++
++	dev_id = of_match_device(aspeed_gfx_match, &pdev->dev);
++	if (!dev_id)
++		return -EINVAL;
++	
++	priv->version = (int)dev_id->data;
++	priv->scu = syscon_regmap_lookup_by_compatible("aspeed,ast2600-scu");
+ 	if (IS_ERR(priv->scu)) {
+ 		dev_err(&pdev->dev, "failed to find SCU regmap\n");
+ 		return PTR_ERR(priv->scu);
+@@ -129,13 +153,23 @@
+ 		return ret;
+ 	}
+ 
+-	priv->rst = devm_reset_control_get_exclusive(&pdev->dev, NULL);
+-	if (IS_ERR(priv->rst)) {
++	priv->crt_rst = devm_reset_control_get(&pdev->dev, "crt");
++	if (IS_ERR(priv->crt_rst)) {
+ 		dev_err(&pdev->dev,
+-			"missing or invalid reset controller device tree entry");
+-		return PTR_ERR(priv->rst);
++			"missing or invalid crt reset controller device tree entry");
++		return PTR_ERR(priv->crt_rst);
+ 	}
+-	reset_control_deassert(priv->rst);
++
++	reset_control_deassert(priv->crt_rst);
++
++	priv->engine_rst = devm_reset_control_get(&pdev->dev, "engine");
++	if (IS_ERR(priv->engine_rst)) {
++		dev_err(&pdev->dev,
++			"missing or invalid engine reset controller device tree entry");
++		return PTR_ERR(priv->engine_rst);
++	}
++
++	reset_control_deassert(priv->engine_rst);
+ 
+ 	priv->clk = devm_clk_get(drm->dev, NULL);
+ 	if (IS_ERR(priv->clk)) {
+@@ -178,6 +212,8 @@
+ 
+ 	drm_mode_config_reset(drm);
+ 
++	drm_kms_helper_poll_init(drm);
++
+ 	drm_fbdev_generic_setup(drm, 32);
+ 
+ 	return 0;
+@@ -194,7 +230,8 @@
+ DEFINE_DRM_GEM_CMA_FOPS(fops);
+ 
+ static struct drm_driver aspeed_gfx_driver = {
+-	.driver_features        = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
++	.driver_features        = DRIVER_GEM | DRIVER_MODESET |
++				DRIVER_PRIME | DRIVER_ATOMIC,
+ 	.gem_create_object	= drm_cma_gem_create_object_default_funcs,
+ 	.dumb_create		= drm_gem_cma_dumb_create,
+ 	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd,
+@@ -209,11 +246,6 @@
+ 	.minor = 0,
+ };
+ 
+-static const struct of_device_id aspeed_gfx_match[] = {
+-	{ .compatible = "aspeed,ast2500-gfx" },
+-	{ }
+-};
+-
+ static int aspeed_gfx_probe(struct platform_device *pdev)
+ {
+ 	struct drm_device *drm;
+--- linux-5.4.85/drivers/gpu/drm/aspeed/aspeed_gfx.h	2021-04-15 16:07:59.082639486 +0800
++++ linux-5.4.85-new/drivers/gpu/drm/aspeed/aspeed_gfx.h	2021-04-23 13:42:36.190292150 +0800
+@@ -6,8 +6,10 @@
+ 
+ struct aspeed_gfx {
+ 	void __iomem			*base;
++	int					version;
+ 	struct clk			*clk;
+-	struct reset_control		*rst;
++	struct reset_control		*crt_rst;
++	struct reset_control		*engine_rst;
+ 	struct regmap			*scu;
+ 
+ 	struct drm_simple_display_pipe	pipe;
+@@ -15,6 +17,12 @@
+ 	struct drm_fbdev_cma		*fbdev;
+ };
+ 
++enum aspeed_gfx_version {
++	GFX_AST2400,
++	GFX_AST2500,
++	GFX_AST2600,
++};
++
+ int aspeed_gfx_create_pipe(struct drm_device *drm);
+ int aspeed_gfx_create_output(struct drm_device *drm);
+ 
+@@ -74,7 +82,7 @@
+ /* CTRL2 */
+ #define CRT_CTRL_DAC_EN			BIT(0)
+ #define CRT_CTRL_VBLANK_LINE(x)		(((x) << 20) & CRT_CTRL_VBLANK_LINE_MASK)
+-#define CRT_CTRL_VBLANK_LINE_MASK	GENMASK(20, 31)
++#define CRT_CTRL_VBLANK_LINE_MASK	GENMASK(31, 20)
+ 
+ /* CRT_HORIZ0 */
+ #define CRT_H_TOTAL(x)			(x)
+@@ -101,4 +109,6 @@
+ #define CRT_THROD_HIGH(x)		((x) << 8)
+ 
+ /* Default Threshold Seting */
++#define CRT_THROD_VAL	(CRT_THROD_LOW(0x1E) | CRT_THROD_HIGH(0x12))
+ #define G5_CRT_THROD_VAL	(CRT_THROD_LOW(0x24) | CRT_THROD_HIGH(0x3C))
++#define G6_CRT_THROD_VAL	(CRT_THROD_LOW(0x50) | CRT_THROD_HIGH(0x70))
+--- linux-5.4.85/include/drm/drm_drv.h	2021-04-15 16:08:53.993536845 +0800
++++ linux-5.4.85-new/include/drm/drm_drv.h	2021-04-23 13:43:00.157741491 +0800
+@@ -62,6 +62,12 @@
+ 	 */
+ 	DRIVER_MODESET			= BIT(1),
+ 	/**
++	 * @DRIVER_PRIME:
++	 *
++	 * Driver implements DRM PRIME buffer sharing.
++	 */
++	DRIVER_PRIME			= BIT(2),
++	/**
+ 	 * @DRIVER_RENDER:
+ 	 *
+ 	 * Driver supports dedicated render nodes. See also the :ref:`section on

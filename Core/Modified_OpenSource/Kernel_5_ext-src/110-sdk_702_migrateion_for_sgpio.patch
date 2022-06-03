@@ -1,0 +1,330 @@
+diff -Naur linux_old/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi linux/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi
+--- linux_old/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi	2021-11-05 14:49:27.000000000 +0800
++++ linux/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi	2021-11-03 13:35:32.075059515 +0800
+@@ -882,6 +882,11 @@
+ 		groups = "SGPM1";
+ 	};
+ 
++	pinctrl_sgpm2_default: sgpm2_default {
++		function = "SGPM2";
++		groups = "SGPM2";
++	};
++
+ 	pinctrl_sgps1_default: sgps1_default {
+ 		function = "SGPS1";
+ 		groups = "SGPS1";
+diff -Naur linux_old/drivers/gpio/gpio-aspeed.c linux/drivers/gpio/gpio-aspeed.c
+--- linux_old/drivers/gpio/gpio-aspeed.c	2021-11-03 14:47:20.000000000 +0800
++++ linux/drivers/gpio/gpio-aspeed.c	2021-11-03 14:48:31.000000000 +0800
+@@ -1161,6 +1161,7 @@
+ 
+ static const struct aspeed_bank_props ast2600_bank_props[] = {
+ 	/*     input	  output   */
++	{4, 0xffffffff,  0x00ffffff}, /* Q/R/S/T */
+ 	{5, 0xffffffff,  0xffffff00}, /* U/V/W/X */
+ 	{6, 0x0000ffff,  0x0000ffff}, /* Y/Z */
+ 	{ },
+diff -Naur linux_old/drivers/gpio/sgpio-aspeed.c linux/drivers/gpio/sgpio-aspeed.c
+--- linux_old/drivers/gpio/sgpio-aspeed.c	2021-11-03 14:47:51.000000000 +0800
++++ linux/drivers/gpio/sgpio-aspeed.c	2021-11-05 15:33:06.436583083 +0800
+@@ -17,39 +17,33 @@
+ #include <linux/spinlock.h>
+ #include <linux/string.h>
+ 
+-/*
+- * MAX_NR_HW_GPIO represents the number of actual hardware-supported GPIOs (ie,
+- * slots within the clocked serial GPIO data). Since each HW GPIO is both an
+- * input and an output, we provide MAX_NR_HW_GPIO * 2 lines on our gpiochip
+- * device.
+- *
+- * We use SGPIO_OUTPUT_OFFSET to define the split between the inputs and
+- * outputs; the inputs start at line 0, the outputs start at OUTPUT_OFFSET.
+- */
+-#define MAX_NR_HW_SGPIO 128
+-#define SGPIO_OUTPUT_OFFSET		MAX_NR_HW_SGPIO
+-
+ #define ASPEED_SGPIO_CTRL		0x54
+ 
+-#define ASPEED_SGPIO_PINS_MASK	  GENMASK(10, 6)
+-#define ASPEED_SGPIO_CLK_DIV_MASK GENMASK(31, 16)
+-#define ASPEED_SGPIO_ENABLE	  BIT(0)
++#define ASPEED_SGPIO_CLK_DIV_MASK	GENMASK(31, 16)
++#define ASPEED_SGPIO_ENABLE		BIT(0)
++#define ASPEED_SGPIO_PINS_SHIFT		6
++
++struct aspeed_sgpio_pdata {
++	const u32 pin_mask;
++};
+ 
+ struct aspeed_sgpio {
+ 	struct gpio_chip chip;
++	struct irq_chip intc;
+ 	struct clk *pclk;
+ 	spinlock_t lock;
+ 	void __iomem *base;
+ 	int irq;
++	int max_ngpios;
+ 	int n_sgpio;
+ };
+ 
+ struct aspeed_sgpio_bank {
+-	uint16_t val_regs;
+-	uint16_t rdata_reg;
+-	uint16_t irq_regs;
+-	uint16_t tolerance_regs;
+-	const char names[4][3];
++	u16    val_regs;
++	u16    rdata_reg;
++	u16    irq_regs;
++	u16    tolerance_regs;
++	const char  names[4][3];
+ };
+ 
+ /*
+@@ -154,7 +148,7 @@
+ 		unsigned long *valid_mask, unsigned int ngpios)
+ {
+ 	struct aspeed_sgpio *sgpio = gpiochip_get_data(gc);
+-	int max_ngpios = MAX_NR_HW_SGPIO;
++	int max_ngpios = sgpio->max_ngpios;
+ 	int n = sgpio->n_sgpio;
+ 	int c = max_ngpios - n;
+ 
+@@ -164,7 +158,7 @@
+ 	bitmap_set(valid_mask, 0, n);
+ 	bitmap_clear(valid_mask, n, c);
+ 
+-	/* output GPIOS above SGPIO_OUTPUT_OFFSET */
++	/* output GPIOS above max_ngpios */
+ 	bitmap_set(valid_mask, max_ngpios, n);
+ 	bitmap_clear(valid_mask, max_ngpios + n, c);
+ 
+@@ -177,7 +171,7 @@
+ 	struct aspeed_sgpio *sgpio = gpiochip_get_data(gc);
+ 	int n = sgpio->n_sgpio;
+ 
+-	WARN_ON(ngpios < MAX_NR_HW_SGPIO * 2);
++	WARN_ON(ngpios < sgpio->max_ngpios * 2);
+ 
+ 	/* input GPIOs in the lower range */
+ 	bitmap_set(valid_mask, 0, n);
+@@ -192,15 +186,15 @@
+ static int aspeed_sgpio_get(struct gpio_chip *gc, unsigned int offset)
+ {
+ 	struct aspeed_sgpio *gpio = gpiochip_get_data(gc);
+-	const struct aspeed_sgpio_bank *bank = to_bank(offset,SGPIO_OUTPUT_OFFSET);
++	const struct aspeed_sgpio_bank *bank = to_bank(offset, gpio->max_ngpios);
+ 	unsigned long flags;
+ 	enum aspeed_sgpio_reg reg;
+ 	int rc = 0;
+ 
+ 	spin_lock_irqsave(&gpio->lock, flags);
+ 
+-	reg = aspeed_sgpio_is_input(offset,SGPIO_OUTPUT_OFFSET) ? reg_val : reg_rdata;
+-	rc = !!(ioread32(bank_reg(gpio, bank, reg)) & GPIO_BIT(offset %SGPIO_OUTPUT_OFFSET));
++	reg = aspeed_sgpio_is_input(offset, gpio->max_ngpios) ? reg_val : reg_rdata;
++	rc = !!(ioread32(bank_reg(gpio, bank, reg)) & GPIO_BIT(offset % gpio->max_ngpios));
+ 
+ 	spin_unlock_irqrestore(&gpio->lock, flags);
+ 
+@@ -210,11 +204,11 @@
+ static int sgpio_set_value(struct gpio_chip *gc, unsigned int offset, int val)
+ {
+ 	struct aspeed_sgpio *gpio = gpiochip_get_data(gc);
+-	const struct aspeed_sgpio_bank *bank = to_bank(offset,SGPIO_OUTPUT_OFFSET);
++	const struct aspeed_sgpio_bank *bank = to_bank(offset, gpio->max_ngpios);
+ 	void __iomem *addr_r, *addr_w;
+ 	u32 reg = 0;
+ 
+-	if (aspeed_sgpio_is_input(offset,SGPIO_OUTPUT_OFFSET))
++	if (aspeed_sgpio_is_input(offset, gpio->max_ngpios))
+ 		return -EINVAL;
+ 
+ 	/* Since this is an output, read the cached value from rdata, then
+@@ -225,9 +219,9 @@
+ 	reg = ioread32(addr_r);
+ 
+ 	if (val)
+-		reg |= GPIO_BIT(offset % SGPIO_OUTPUT_OFFSET);
++		reg |= GPIO_BIT(offset % gpio->max_ngpios);
+ 	else
+-		reg &= ~GPIO_BIT(offset % SGPIO_OUTPUT_OFFSET);
++		reg &= ~GPIO_BIT(offset % gpio->max_ngpios);
+ 
+ 	iowrite32(reg, addr_w);
+ 
+@@ -248,7 +242,8 @@
+ 
+ static int aspeed_sgpio_dir_in(struct gpio_chip *gc, unsigned int offset)
+ {
+-	return aspeed_sgpio_is_input(offset,SGPIO_OUTPUT_OFFSET) ? 0 : -EINVAL;
++	struct aspeed_sgpio *gpio = gpiochip_get_data(gc);
++	return aspeed_sgpio_is_input(offset, gpio->max_ngpios) ? 0 : -EINVAL;
+ }
+ 
+ static int aspeed_sgpio_dir_out(struct gpio_chip *gc, unsigned int offset, int val)
+@@ -269,7 +264,8 @@
+ 
+ static int aspeed_sgpio_get_direction(struct gpio_chip *gc, unsigned int offset)
+ {
+-	return !!aspeed_sgpio_is_input(offset,SGPIO_OUTPUT_OFFSET);
++	struct aspeed_sgpio *gpio = gpiochip_get_data(gc);
++	return !!aspeed_sgpio_is_input(offset, gpio->max_ngpios);
+ }
+ 
+ static void irqd_to_aspeed_sgpio_data(struct irq_data *d,
+@@ -284,8 +280,8 @@
+ 	WARN_ON(!internal);
+ 
+ 	*gpio = internal;
+-	*bank = to_bank(*offset,SGPIO_OUTPUT_OFFSET);
+-	*bit = GPIO_BIT(*offset % SGPIO_OUTPUT_OFFSET);
++	*bank = to_bank(*offset, internal->max_ngpios);
++	*bit = GPIO_BIT(*offset % internal->max_ngpios);
+ }
+ 
+ static void aspeed_sgpio_irq_ack(struct irq_data *d)
+@@ -422,20 +418,12 @@
+ 			girq = irq_find_mapping(gc->irq.domain, i * 32 + p);
+ 			generic_handle_irq(girq);
+ 		}
+-		iowrite32(reg, bank_reg(data, bank, reg_irq_status));
++
+ 	}
+ 
+ 	chained_irq_exit(ic, desc);
+ }
+ 
+-static struct irq_chip aspeed_sgpio_irqchip = {
+-	.name = "aspeed-sgpiom",
+-	.irq_ack = aspeed_sgpio_irq_ack,
+-	.irq_mask = aspeed_sgpio_irq_mask,
+-	.irq_unmask = aspeed_sgpio_irq_unmask,
+-	.irq_set_type = aspeed_sgpio_set_type,
+-};
+-
+ static int aspeed_sgpio_setup_irqs(struct aspeed_sgpio *gpio,
+ 				   struct platform_device *pdev)
+ {
+@@ -458,8 +446,14 @@
+ 		iowrite32(0xffffffff, bank_reg(gpio, bank, reg_irq_status));
+ 	}
+ 
++	gpio->intc.name = dev_name(&pdev->dev);
++	gpio->intc.irq_ack = aspeed_sgpio_irq_ack;
++	gpio->intc.irq_mask = aspeed_sgpio_irq_mask;
++	gpio->intc.irq_unmask = aspeed_sgpio_irq_unmask;
++	gpio->intc.irq_set_type = aspeed_sgpio_set_type;
++
+ 	irq = &gpio->chip.irq;
+-	irq->chip = &aspeed_sgpio_irqchip;
++	irq->chip = &gpio->intc;
+ 	irq->init_valid_mask = aspeed_sgpio_irq_init_valid_mask;
+ 	irq->handler = handle_bad_irq;
+ 	irq->default_type = IRQ_TYPE_NONE;
+@@ -484,6 +478,10 @@
+ 	return 0;
+ }
+ 
++static const struct aspeed_sgpio_pdata ast2400_sgpio_pdata = {
++	.pin_mask = GENMASK(9, 6),
++};
++
+ static int aspeed_sgpio_reset_tolerance(struct gpio_chip *chip,
+ 					unsigned int offset, bool enable)
+ {
+@@ -492,16 +490,16 @@
+ 	void __iomem *reg;
+ 	u32 val;
+ 
+-	reg = bank_reg(gpio, to_bank(offset,SGPIO_OUTPUT_OFFSET), reg_tolerance);
++	reg = bank_reg(gpio, to_bank(offset, gpio->max_ngpios), reg_tolerance);
+ 
+ 	spin_lock_irqsave(&gpio->lock, flags);
+ 
+ 	val = readl(reg);
+ 
+ 	if (enable)
+-		val |= GPIO_BIT(offset % SGPIO_OUTPUT_OFFSET);
++		val |= GPIO_BIT(offset % gpio->max_ngpios);
+ 	else
+-		val &= ~GPIO_BIT(offset % SGPIO_OUTPUT_OFFSET);
++		val &= ~GPIO_BIT(offset % gpio->max_ngpios);
+ 
+ 	writel(val, reg);
+ 
+@@ -522,10 +520,14 @@
+ 		return -ENOTSUPP;
+ }
+ 
++static const struct aspeed_sgpio_pdata ast2600_sgpiom_pdata = {
++	.pin_mask = GENMASK(10, 6),
++};
++
+ static const struct of_device_id aspeed_sgpio_of_table[] = {
+-	{ .compatible = "aspeed,ast2400-sgpiom" },
+-	{ .compatible = "aspeed,ast2500-sgpiom" },
+-	{ .compatible = "aspeed,ast2600-sgpiom" },
++	{ .compatible = "aspeed,ast2400-sgpio", .data = &ast2400_sgpio_pdata, },
++	{ .compatible = "aspeed,ast2500-sgpio", .data = &ast2400_sgpio_pdata, },
++	{ .compatible = "aspeed,ast2600-sgpiom", .data = &ast2600_sgpiom_pdata, },
+ 	{}
+ };
+ 
+@@ -534,7 +536,7 @@
+ static int __init aspeed_sgpio_probe(struct platform_device *pdev)
+ {
+ 	struct aspeed_sgpio *gpio;
+-	u32 nr_gpios, sgpio_freq, sgpio_clk_div, base;
++	u32 nr_gpios, sgpio_freq, sgpio_clk_div,gpio_cnt_regval, pin_mask, max_ngpios, base;
+ 	int rc;
+ 	unsigned long apb_freq;
+ 
+@@ -545,16 +547,24 @@
+ 	gpio->base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(gpio->base))
+ 		return PTR_ERR(gpio->base);
++	
++	rc = of_property_read_u32(pdev->dev.of_node, "max-ngpios", &max_ngpios);
++	if (rc < 0) {
++		dev_err(&pdev->dev, "Could not read max-ngpios property\n");
++		return -EINVAL;
++	}
++	gpio->max_ngpios = max_ngpios;
+ 
+ 	rc = of_property_read_u32(pdev->dev.of_node, "ngpios", &nr_gpios);
+ 	if (rc < 0) {
+ 		dev_err(&pdev->dev, "Could not read ngpios property\n");
+ 		return -EINVAL;
+-	} else if (nr_gpios > MAX_NR_HW_SGPIO) {
+-		dev_err(&pdev->dev, "Number of GPIOs exceeds the maximum of %d: %d\n",
+-			MAX_NR_HW_SGPIO, nr_gpios);
++	} else if (nr_gpios % 8) {
++		dev_err(&pdev->dev, "Number of GPIOs not multiple of 8: %d\n",
++			nr_gpios);
+ 		return -EINVAL;
+ 	}
++
+ 	gpio->n_sgpio = nr_gpios;
+ 
+ 	rc = of_property_read_u32(pdev->dev.of_node, "bus-frequency",
+@@ -596,15 +606,14 @@
+ 	if (sgpio_clk_div > (1 << 16) - 1)
+ 		return -EINVAL;
+ 
+-	iowrite32(FIELD_PREP(ASPEED_SGPIO_CLK_DIV_MASK, sgpio_clk_div) |
+-		  FIELD_PREP(ASPEED_SGPIO_PINS_MASK, (nr_gpios / 8)) |
+-		  ASPEED_SGPIO_ENABLE,
+-		  gpio->base + ASPEED_SGPIO_CTRL);
++	gpio_cnt_regval = ((nr_gpios / 8) << ASPEED_SGPIO_PINS_SHIFT) & pin_mask;
++	iowrite32(FIELD_PREP(ASPEED_SGPIO_CLK_DIV_MASK, sgpio_clk_div) | gpio_cnt_regval |
++		  ASPEED_SGPIO_ENABLE, gpio->base + ASPEED_SGPIO_CTRL);
+ 
+ 	spin_lock_init(&gpio->lock);
+ 
+ 	gpio->chip.parent = &pdev->dev;
+-	gpio->chip.ngpio = MAX_NR_HW_SGPIO * 2;
++	gpio->chip.ngpio = gpio->max_ngpios * 2;
+ 	gpio->chip.init_valid_mask = aspeed_sgpio_init_valid_mask;
+ 	gpio->chip.direction_input = aspeed_sgpio_dir_in;
+ 	gpio->chip.direction_output = aspeed_sgpio_dir_out;

@@ -1,0 +1,294 @@
+--- linux/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-04-21 12:17:04.924249650 +0530
++++ linux_new/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-05-11 19:22:35.387622570 +0530
+@@ -87,10 +87,12 @@
+ 	u8 last_chan;           /* last register value */
+ 	/* MUX_IDLE_AS_IS, MUX_IDLE_DISCONNECT or >= 0 for channel */
+ 	s8 idle_state;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	s8 deselect_timeout;
+ 
+ 	int doChanDeselect;
+ 	wait_queue_head_t chanDeselectWait;
++#endif
+ 	struct i2c_client *client;
+ 
+ 	struct irq_domain *irq;
+@@ -99,8 +101,14 @@
+ 	bool ctrl_state;
+ };
+ 
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ extern int i2c_slave_state[MAX_I2C_ADAPTERS];
+ 
++struct ctrl_sw_chandata {
++	u8 channel_mask;
++};
++#endif
++
+ /* Provide specs for the PCA954x types we know about */
+ static const struct chip_desc chips[] = {
+ 	[pca_9540] = {
+@@ -234,6 +242,26 @@
+ 				I2C_SMBUS_BYTE, &dummy);
+ }
+ 
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++static int get_switch_mask(struct i2c_mux_core *muxc)
++{
++	int i, switchMask = 0;
++	struct ctrl_sw_chandata *sw_chandata = NULL;
++
++	for ( i = 0; i < PCA954X_MAX_NCHANS;  i++ )
++	{
++		sw_chandata = muxc->adapter[i]->dev.platform_data;
++		if(sw_chandata != NULL)
++		{
++			if (sw_chandata->channel_mask == 1)
++				switchMask |= 1 << i;
++		}
++	}
++
++	return switchMask;
++}
++#endif
++
+ static int pca954x_select_chan(struct i2c_mux_core *muxc, u32 chan)
+ {
+ 	struct pca954x *data = i2c_mux_priv(muxc);
+@@ -246,7 +274,13 @@
+ 	if (chip->muxtype == pca954x_ismux)
+ 		regval = chan | chip->enable;
+ 	else
++	{
+ 		regval = 1 << chan;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++		/* update constantly opened channel value */
++		regval |= get_switch_mask(muxc);
++#endif
++	}
+ 
+ 	/* Only select the channel if its different from the last channel */
+ 	if ((data->last_chan != regval) ) 
+@@ -258,7 +292,9 @@
+ 		ret = pca954x_reg_write(muxc->parent, client, regval);
+ 		data->last_chan = ret < 0 ? 0 : regval;
+ 	}
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	data->doChanDeselect = 0;
++#endif
+ 
+ 	return ret;
+ }
+@@ -270,10 +306,13 @@
+ 	s8 idle_state;
+ 	bool ctrl_state;
+ 	struct i2c_adapter *root;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	s8 deselect_timeout;
++#endif
+ 
+ 	idle_state = READ_ONCE(data->idle_state);
+ 	ctrl_state = READ_ONCE(data->ctrl_state);
++
+ 	if (idle_state >= 0)
+ 		/* Set the mux back to a predetermined channel */
+ 		return pca954x_select_chan(muxc, idle_state);
+@@ -286,10 +325,16 @@
+ #endif
+ 		/* Deselect active channel */
+ 		data->last_chan = 0;
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++		/* update constantly opened channel value */
++		data->last_chan |= get_switch_mask(muxc);
++#endif //VIRTUALI2C_SUPPORT
+ 		return pca954x_reg_write(muxc->parent, client,
+ 					 data->last_chan);
+ 	}
+ 
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	deselect_timeout = READ_ONCE(data->deselect_timeout);
+ 
+         if(deselect_timeout > 0 && deselect_timeout <=127)
+@@ -302,10 +347,13 @@
+                  i2c_slave_state[client->adapter->nr] = 0;
+                  /* Deselect active channel */
+                  data->last_chan = 0;
++		 /* update constantly opened channel value */
++		 data->last_chan |= get_switch_mask(muxc);
+                  return pca954x_reg_write(muxc->parent, client,
+                                          data->last_chan);
+ 
+          }
++#endif
+ 
+ 	/* otherwise leave as-is */
+ 
+@@ -356,6 +404,7 @@
+ 	return ret < 0 ? ret : count;
+ }
+ 
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ static ssize_t deselect_timeout_show(struct device *dev,
+                                      struct device_attribute *attr,
+                                      char *buf)
+@@ -367,7 +416,9 @@
+          return sprintf(buf, "%d\n", READ_ONCE(data->deselect_timeout));
+ 
+ }
++#endif
+ 
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ static ssize_t deselect_timeout_store(struct device *dev,
+                                  struct device_attribute *attr,
+                                  const char *buf, size_t count)
+@@ -398,9 +449,59 @@
+ 
+ 	 return ret < 0 ? ret : count;
+ }
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++static ssize_t channel_mask_show(struct device *dev,
++                                     struct device_attribute *attr,
++                                     char *buf)
++{
++	struct ctrl_sw_chandata *ctrl_swChan = dev->platform_data;
++
++    	if(ctrl_swChan != NULL)
++    	{
++		return sprintf(buf, "%d\n", READ_ONCE(ctrl_swChan -> channel_mask));
++	}
++	
++	return -EFAULT;
++}
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++static ssize_t channel_mask_store(struct device *dev,
++                                 struct device_attribute *attr,
++                                 const char *buf, size_t count)
++{
++	struct ctrl_sw_chandata *ctrl_swChan = dev->platform_data;
++	struct i2c_adapter *adap = to_i2c_adapter(dev);
++	int val = 0;
++	int ret = 0;
++         
++	ret = kstrtoint(buf, 0, &val);
++    	if (ret < 0)
++    		return ret;
++ 
++ 	if (val < 0 || val > 1 )
++       		return -EINVAL;
++
++	if(ctrl_swChan != NULL)
++    	{
++		i2c_lock_bus(adap, I2C_LOCK_SEGMENT);
++
++		WRITE_ONCE(ctrl_swChan -> channel_mask,val);
++		
++		i2c_unlock_bus(adap, I2C_LOCK_SEGMENT);
++	}
++
++    	return ret < 0 ? ret : count;
++}
++#endif
+ 
+ static DEVICE_ATTR_RW(idle_state);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ static DEVICE_ATTR_RW(deselect_timeout);
++static DEVICE_ATTR_RW(channel_mask);
++#endif
+ 
+ static irqreturn_t pca954x_irq_handler(int irq, void *dev_id)
+ {
+@@ -470,9 +571,20 @@
+ 	struct pca954x *data = i2c_mux_priv(muxc);
+ 	struct i2c_client *client = data->client;
+ 	int c, irq;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++	int num;
++#endif
+ 
+ 	device_remove_file(&client->dev, &dev_attr_idle_state);
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	device_remove_file(&client->dev, &dev_attr_deselect_timeout);
++	/* Remove the channel mask file */
++	for(num = 0; num < data->chip->nchans; num++)
++	{
++		device_create_file(&muxc->adapter[num]->dev, &dev_attr_channel_mask);
++	}
++#endif
+ 
+ 	if (data->irq) {
+ 		for (c = 0; c < data->chip->nchans; c++) {
+@@ -500,6 +612,10 @@
+ 	struct pca954x *data;
+ 	int num;
+ 	int ret;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++	struct ctrl_sw_chandata *ctrl_swchan;	
++	u32 ch_mask = 0;
++#endif
+ 
+ 	if (!i2c_check_functionality(adap, I2C_FUNC_SMBUS_BYTE))
+ 		return -ENODEV;
+@@ -556,8 +672,10 @@
+ 
+ 	data->last_chan = 0;		   /* force the first selection */
+ 	data->idle_state = MUX_IDLE_AS_IS;
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	data->deselect_timeout = -1;
+ 	data->doChanDeselect = 0;
++#endif
+ 
+ 
+ 	idle_disconnect_dt = np &&
+@@ -576,6 +694,27 @@
+ 		ret = i2c_mux_add_adapter(muxc, 0, num, 0);
+ 		if (ret)
+ 			goto fail_cleanup;
++
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
++		/* Add mask attribute for each channel */
++		ctrl_swchan = kzalloc(sizeof(*ctrl_swchan), GFP_KERNEL);
++	    	if (ctrl_swchan == NULL)
++        		return -ENOMEM;
++
++		muxc->adapter[num]->dev.platform_data = ctrl_swchan;
++		ret = device_create_file(&muxc->adapter[num]->dev, &dev_attr_channel_mask);
++        	if (ret)
++            		goto fail_cleanup;
++		        
++		/* Initialize the chennel_mask from dts value */
++		ret = of_property_read_u32(muxc->adapter[num]->dev.of_node, "mask", &ch_mask);
++        	if(ret < 0)
++        	{
++               		printk("there is no bus-mode property. use bye-mode as default.");
++	               	ch_mask = 0;
++        	}
++		ctrl_swchan->channel_mask = ch_mask;
++#endif
+ 	}
+ 
+ 	if (data->irq) {
+@@ -586,14 +725,18 @@
+ 		if (ret)
+ 			goto fail_cleanup;
+ 	}
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	init_waitqueue_head(&(data->chanDeselectWait));
++#endif
+ 
+ 	/*
+ 	 * The attr probably isn't going to be needed in most cases,
+ 	 * so don't fail completely on error.
+ 	 */
+ 	device_create_file(dev, &dev_attr_idle_state);
++#ifdef CONFIG_SPX_FEATURE_VIRTUALI2C_SUPPORT
+ 	device_create_file(dev, &dev_attr_deselect_timeout);
++#endif
+ 
+ 	dev_info(dev, "registered %d multiplexed busses for I2C %s %s\n",
+ 		 num, data->chip->muxtype == pca954x_ismux

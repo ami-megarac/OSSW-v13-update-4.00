@@ -1,0 +1,77 @@
+--- linux-5.4.85/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi	2021-04-15 16:07:45.978902075 +0800
++++ linux-5.4.85-new/arch/arm/boot/dts/aspeed-g6-pinctrl.dtsi	2021-04-19 17:19:55.995226253 +0800
+@@ -297,6 +297,16 @@
+ 		groups = "I2C9";
+ 	};
+ 
++	pinctrl_i3c1_default: i3c1_default {
++		function = "I3C1";
++		groups = "I3C1";
++	};
++
++	pinctrl_i3c2_default: i3c2_default {
++		function = "I3C2";
++		groups = "I3C2";
++	};
++
+ 	pinctrl_i3c3_default: i3c3_default {
+ 		function = "I3C3";
+ 		groups = "I3C3";
+@@ -653,12 +663,12 @@
+ 	};
+ 
+ 	pinctrl_qspi1_default: qspi1_default {
+-		function = "QSPI1";
++		function = "SPI1";
+ 		groups = "QSPI1";
+ 	};
+ 
+ 	pinctrl_qspi2_default: qspi2_default {
+-		function = "QSPI2";
++		function = "SPI2";
+ 		groups = "QSPI2";
+ 	};
+ 
+@@ -868,8 +868,8 @@
+ 	};
+ 
+ 	pinctrl_emmc_default: emmc_default {
+-		function = "SD3";
+-		groups = "EMMC";
++		function = "EMMC";
++		groups = "EMMCG4";
+ 	};
+ 
+ 	pinctrl_sgpm1_default: sgpm1_default {
+@@ -1117,6 +1127,20 @@
+ 		groups = "UART9";
+ 	};
+ 
++	pinctrl_usb2ad_default: usb2ad_default {
++		function = "USB2AD";
++		groups = "USBA";
++	};
++
++	pinctrl_usb2bh_default: usb2bh_default {
++		function = "USB2BH";
++		groups = "USBB";
++	};
++
++	pinctrl_usb2bd_default: usb2bd_default {
++		function = "USB2BD";
++		groups = "USBB";
++	};
+ 	pinctrl_vb_default: vb_default {
+ 		function = "VB";
+ 		groups = "VB";
+@@ -1151,4 +1175,10 @@
+ 		function = "WDTRST4";
+ 		groups = "WDTRST4";
+ 	};
++
++	pinctrl_fwspi18_default: fwspi18_default {
++		function = "FWSPI18";
++		groups = "FWSPI18";
++	};
++
+ };

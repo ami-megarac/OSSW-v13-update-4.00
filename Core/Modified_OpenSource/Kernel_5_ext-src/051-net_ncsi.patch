@@ -1,0 +1,1891 @@
+--- linux-5.4.124/net/ncsi/internal.h	2021-09-30 10:10:32.846373210 +0800
++++ linux-5.4.124-new/net/ncsi/internal.h	2021-10-04 17:07:23.977050423 +0800
+@@ -47,7 +47,7 @@
+ 	NCSI_CAP_AEN_MASK                = 0x07,
+ 	NCSI_CAP_VLAN_ONLY               = 0x01, /* Filter VLAN packet only  */
+ 	NCSI_CAP_VLAN_NO                 = 0x02, /* Filter VLAN and non-VLAN */
+-	NCSI_CAP_VLAN_ANY                = 0x04, /* Filter Any-and-non-VLAN  */
++	NCSI_CAP_VLAN_ANY                = 0x03, /* Filter Any-and-non-VLAN  */
+ 	NCSI_CAP_VLAN_MASK               = 0x07
+ };
+ 
+@@ -65,6 +65,7 @@
+ };
+ 
+ /* OEM Vendor Manufacture ID */
++#define NCSI_OEM_MFR_INT_ID             0x0157
+ #define NCSI_OEM_MFR_MLX_ID             0x8119
+ #define NCSI_OEM_MFR_BCM_ID             0x113d
+ /* Broadcom specific OEM Command */
+@@ -73,6 +74,7 @@
+ #define NCSI_OEM_MLX_CMD_GMA            0x00   /* CMD ID for Get MAC */
+ #define NCSI_OEM_MLX_CMD_GMA_PARAM      0x1b   /* Parameter for GMA  */
+ /* OEM Command payload lengths*/
++#define NCSI_OEM_INT_CMD_MAN_ONL_LEN    7
+ #define NCSI_OEM_BCM_CMD_GMA_LEN        12
+ #define NCSI_OEM_MLX_CMD_GMA_LEN        8
+ /* Mac address offset in OEM response */
+@@ -183,8 +185,16 @@
+ #define NCSI_RESERVED_CHANNEL	0x1f
+ #define NCSI_CHANNEL_INDEX(c)	((c) & ((1 << NCSI_PACKAGE_SHIFT) - 1))
+ #define NCSI_TO_CHANNEL(p, c)	(((p) << NCSI_PACKAGE_SHIFT) | (c))
++#ifdef CONFIG_SPX_FEATURE_NCSI_MAXIMUM_PACKAGEID
++#define NCSI_MAX_PACKAGE	CONFIG_SPX_FEATURE_NCSI_MAXIMUM_PACKAGEID
++#else
+ #define NCSI_MAX_PACKAGE	8
++#endif
++#ifdef CONFIG_SPX_FEATURE_NCSI_MAXIMUM_CHANNELID
++#define NCSI_MAX_CHANNEL	CONFIG_SPX_FEATURE_NCSI_MAXIMUM_CHANNELID
++#else
+ #define NCSI_MAX_CHANNEL	32
++#endif
+ 
+ struct ncsi_channel {
+ 	unsigned char               id;
+@@ -229,6 +239,18 @@
+ 	struct ncsi_channel  *preferred_channel; /* Primary channel      */
+ };
+ 
++struct aen_status {
++	bool had_link; 
++	bool has_link;
++	struct ncsi_channel *nc;
++};
++
++struct ncsi_poll_link_status {
++	bool is_enable;
++	u32 status;	
++	unsigned char id;
++};
++
+ struct ncsi_request {
+ 	unsigned char        id;      /* Request ID - 0 to 255           */
+ 	bool                 used;    /* Request that has been assigned  */
+@@ -243,6 +265,7 @@
+ 	u32                  snd_seq;     /* netlink sending sequence number */
+ 	u32                  snd_portid;  /* netlink portid of sender        */
+ 	struct nlmsghdr      nlhdr;       /* netlink message header          */
++	unsigned char        retry;      /* retry time           */
+ };
+ 
+ enum {
+@@ -312,6 +335,9 @@
+ 
+ 	bool                multi_package;   /* Enable multiple packages   */
+ 	u32                 package_whitelist; /* Packages to configure    */
++	struct work_struct  aen_work;        /* For aen management     */
++	struct aen_status	aen_stat;		 /* For aen status     */
++	struct ncsi_poll_link_status polling; /* For polling status     */
+ };
+ 
+ struct ncsi_cmd_arg {
+@@ -333,6 +359,8 @@
+ 
+ extern struct list_head ncsi_dev_list;
+ extern spinlock_t ncsi_dev_lock;
++extern int InitComplete;
++extern int verbose;
+ 
+ #define TO_NCSI_DEV_PRIV(nd) \
+ 	container_of(nd, struct ncsi_dev_priv, ndev)
+@@ -379,5 +407,7 @@
+ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
+ 		 struct packet_type *pt, struct net_device *orig_dev);
+ int ncsi_aen_handler(struct ncsi_dev_priv *ndp, struct sk_buff *skb);
++int ncsi_set_flow_control(struct ncsi_dev_priv *ndp, unsigned char  UserFlowcontrol);
++int ncsi_set_Vetobit(struct ncsi_dev_priv *ndp, unsigned char  Vetobit);
+ 
+ #endif /* __NCSI_INTERNAL_H__ */
+--- linux-5.4.124/net/ncsi/ncsi-aen.c	2021-09-30 10:10:32.846373210 +0800
++++ linux-5.4.124-new/net/ncsi/ncsi-aen.c	2021-10-04 16:21:19.907632400 +0800
+@@ -46,16 +46,15 @@
+ static int ncsi_aen_handler_lsc(struct ncsi_dev_priv *ndp,
+ 				struct ncsi_aen_pkt_hdr *h)
+ {
+-	struct ncsi_channel *nc, *tmp;
++	struct ncsi_channel *nc;
+ 	struct ncsi_channel_mode *ncm;
+ 	unsigned long old_data, data;
+ 	struct ncsi_aen_lsc_pkt *lsc;
+-	struct ncsi_package *np;
+ 	bool had_link, has_link;
+ 	unsigned long flags;
+ 	bool chained;
+ 	int state;
+-
++	
+ 	/* Find the NCSI channel */
+ 	ncsi_find_package_and_channel(ndp, h->common.channel, NULL, &nc);
+ 	if (!nc)
+@@ -87,53 +86,14 @@
+ 			    nc->id);
+ 
+ 	if ((had_link == has_link) || chained)
+-		return 0;
+-
+-	if (!ndp->multi_package && !nc->package->multi_channel) {
+-		if (had_link) {
+-			ndp->flags |= NCSI_DEV_RESHUFFLE;
+-			ncsi_stop_channel_monitor(nc);
+-			spin_lock_irqsave(&ndp->lock, flags);
+-			list_add_tail_rcu(&nc->link, &ndp->channel_queue);
+-			spin_unlock_irqrestore(&ndp->lock, flags);
+-			return ncsi_process_next_channel(ndp);
+-		}
+-		/* Configured channel came up */
+-		return 0;
+-	}
+-
+-	if (had_link) {
+-		ncm = &nc->modes[NCSI_MODE_TX_ENABLE];
+-		if (ncsi_channel_is_last(ndp, nc)) {
+-			/* No channels left, reconfigure */
+-			return ncsi_reset_dev(&ndp->ndev);
+-		} else if (ncm->enable) {
+-			/* Need to failover Tx channel */
+-			ncsi_update_tx_channel(ndp, nc->package, nc, NULL);
+-		}
+-	} else if (has_link && nc->package->preferred_channel == nc) {
+-		/* Return Tx to preferred channel */
+-		ncsi_update_tx_channel(ndp, nc->package, NULL, nc);
+-	} else if (has_link) {
+-		NCSI_FOR_EACH_PACKAGE(ndp, np) {
+-			NCSI_FOR_EACH_CHANNEL(np, tmp) {
+-				/* Enable Tx on this channel if the current Tx
+-				 * channel is down.
+-				 */
+-				ncm = &tmp->modes[NCSI_MODE_TX_ENABLE];
+-				if (ncm->enable &&
+-				    !ncsi_channel_has_link(tmp)) {
+-					ncsi_update_tx_channel(ndp, nc->package,
+-							       tmp, nc);
+-					break;
+-				}
+-			}
+-		}
+-	}
+-
+-	/* Leave configured channels active in a multi-channel scenario so
+-	 * AEN events are still received.
+-	 */
++		return 0;	
++	
++	ndp->aen_stat.had_link = had_link;
++	ndp->aen_stat.has_link = has_link;
++	ndp->aen_stat.nc = nc;
++	
++	schedule_work(&ndp->aen_work); 
++	
+ 	return 0;
+ }
+ 
+--- linux-5.4.124/net/ncsi/ncsi-manage.c	2021-09-30 10:10:32.846373210 +0800
++++ linux-5.4.124-new/net/ncsi/ncsi-manage.c	2021-10-04 17:05:12.088970237 +0800
+@@ -8,6 +8,7 @@
+ #include <linux/init.h>
+ #include <linux/netdevice.h>
+ #include <linux/skbuff.h>
++#include <linux/delay.h>
+ 
+ #include <net/ncsi.h>
+ #include <net/net_namespace.h>
+@@ -23,6 +24,9 @@
+ LIST_HEAD(ncsi_dev_list);
+ DEFINE_SPINLOCK(ncsi_dev_lock);
+ 
++extern int CreateProcSys(void);
++extern int RemoveProcSys(void);
++
+ bool ncsi_channel_has_link(struct ncsi_channel *channel)
+ {
+ 	return !!(channel->modes[NCSI_MODE_LINK].data[2] & 0x1);
+@@ -59,7 +63,6 @@
+ 		goto report;
+ 	}
+ 
+-	nd->link_up = 0;
+ 	NCSI_FOR_EACH_PACKAGE(ndp, np) {
+ 		NCSI_FOR_EACH_CHANNEL(np, nc) {
+ 			spin_lock_irqsave(&nc->lock, flags);
+@@ -79,97 +82,86 @@
+ 			spin_unlock_irqrestore(&nc->lock, flags);
+ 		}
+ 	}
++	nd->link_up = 0;
+ 
+ report:
+-	nd->handler(nd);
++	if(rtnl_trylock()){
++		call_netdevice_notifiers(NETDEV_CHANGE,nd->dev);
++		rtnl_unlock();
++	}
++	else
++		call_netdevice_notifiers(NETDEV_CHANGE,nd->dev);
++	nd->handler(nd);	
+ }
+ 
+ static void ncsi_channel_monitor(struct timer_list *t)
+ {
+ 	struct ncsi_channel *nc = from_timer(nc, t, monitor.timer);
++	struct ncsi_channel *nc_monitor;
+ 	struct ncsi_package *np = nc->package;
+-	struct ncsi_dev_priv *ndp = np->ndp;
+-	struct ncsi_channel_mode *ncm;
++	struct ncsi_dev_priv *ndp = np->ndp;	
+ 	struct ncsi_cmd_arg nca;
+-	bool enabled, chained;
+-	unsigned int monitor_state;
+-	unsigned long flags;
+-	int state, ret;
+-
+-	spin_lock_irqsave(&nc->lock, flags);
+-	state = nc->state;
+-	chained = !list_empty(&nc->link);
+-	enabled = nc->monitor.enabled;
+-	monitor_state = nc->monitor.state;
+-	spin_unlock_irqrestore(&nc->lock, flags);
+-
+-	if (!enabled)
+-		return;		/* expected race disabling timer */
+-	if (WARN_ON_ONCE(chained))
+-		goto bad_state;
+-
+-	if (state != NCSI_CHANNEL_INACTIVE &&
+-	    state != NCSI_CHANNEL_ACTIVE) {
+-bad_state:
+-		netdev_warn(ndp->ndev.dev,
+-			    "Bad NCSI monitor state channel %d 0x%x %s queue\n",
+-			    nc->id, state, chained ? "on" : "off");
+-		spin_lock_irqsave(&nc->lock, flags);
+-		nc->monitor.enabled = false;
+-		spin_unlock_irqrestore(&nc->lock, flags);
+-		return;
++	struct ncsi_channel *disable=NULL, *enable=NULL;	
++	int i;
++	
++	//Make sure NCSI command able to send
++	netif_carrier_on(ndp->ndev.dev);	
++		
++	NCSI_FOR_EACH_PACKAGE(ndp, np) {
++		NCSI_FOR_EACH_CHANNEL(np, nc_monitor) {
++			nca.ndp = ndp;
++			nca.package = np->id;
++			nca.channel = nc_monitor->id;
++			nca.type = NCSI_PKT_CMD_GLS;
++			nca.req_flags = 0;
++			ncsi_xmit_cmd(&nca);		
++		}
+ 	}
+ 
+-	switch (monitor_state) {
+-	case NCSI_CHANNEL_MONITOR_START:
+-	case NCSI_CHANNEL_MONITOR_RETRY:
+-		nca.ndp = ndp;
+-		nca.package = np->id;
+-		nca.channel = nc->id;
+-		nca.type = NCSI_PKT_CMD_GLS;
+-		nca.req_flags = 0;
+-		ret = ncsi_xmit_cmd(&nca);
+-		if (ret)
+-			netdev_err(ndp->ndev.dev, "Error %d sending GLS\n",
+-				   ret);
+-		break;
+-	case NCSI_CHANNEL_MONITOR_WAIT ... NCSI_CHANNEL_MONITOR_WAIT_MAX:
+-		break;
+-	default:
+-		netdev_err(ndp->ndev.dev, "NCSI Channel %d timed out!\n",
+-			   nc->id);
+-		ncsi_report_link(ndp, true);
+-		ndp->flags |= NCSI_DEV_RESHUFFLE;
+-
+-		ncm = &nc->modes[NCSI_MODE_LINK];
+-		spin_lock_irqsave(&nc->lock, flags);
+-		nc->monitor.enabled = false;
+-		nc->state = NCSI_CHANNEL_INVISIBLE;
+-		ncm->data[2] &= ~0x1;
+-		spin_unlock_irqrestore(&nc->lock, flags);
+-
+-		spin_lock_irqsave(&ndp->lock, flags);
+-		nc->state = NCSI_CHANNEL_ACTIVE;
+-		list_add_tail_rcu(&nc->link, &ndp->channel_queue);
+-		spin_unlock_irqrestore(&ndp->lock, flags);
+-		ncsi_process_next_channel(ndp);
+-		return;
++	if(verbose){
++		printk("ndp->polling.status = %x, ndp->polling.id = %d\n", ndp->polling.status, ndp->polling.id);
++	}
++	
++	if(!((ndp->polling.status >> ndp->polling.id)&0x1)){					
++		disable = ncsi_find_channel(nc->package, ndp->polling.id);						
++		
++		for(i = 0; i < NCSI_MAX_CHANNEL; i++){
++			if((ndp->polling.status >> i)&0x1){
++				enable = ncsi_find_channel(nc->package, i);				
++				ndp->polling.id = i;
++				break;
++			}
++		}
++			
++		if(!enable)
++			goto out;				
++		
++		ncsi_update_tx_channel(ndp, nc->package, disable, enable);
++		ncsi_report_link(ndp, false);
+ 	}
+ 
+-	spin_lock_irqsave(&nc->lock, flags);
+-	nc->monitor.state++;
+-	spin_unlock_irqrestore(&nc->lock, flags);
+-	mod_timer(&nc->monitor.timer, jiffies + HZ);
++out:	
++	ndp->polling.status = 0;
++#ifdef CONFIG_SPX_FEATURE_NCSI_TIMER_DEALAY_FOR_GET_LINK_STATUS
++	mod_timer(&nc->monitor.timer, jiffies + (CONFIG_SPX_FEATURE_NCSI_TIMER_DEALAY_FOR_GET_LINK_STATUS*HZ));
++#else
++	mod_timer(&nc->monitor.timer, jiffies + (2*HZ));
++#endif
+ }
+ 
+ void ncsi_start_channel_monitor(struct ncsi_channel *nc)
+ {
+ 	unsigned long flags;
+-
++	struct ncsi_package *np = nc->package;
++	struct ncsi_dev_priv *ndp = np->ndp;		
++	
+ 	spin_lock_irqsave(&nc->lock, flags);
+ 	WARN_ON_ONCE(nc->monitor.enabled);
+ 	nc->monitor.enabled = true;
+-	nc->monitor.state = NCSI_CHANNEL_MONITOR_START;
++	nc->monitor.state = NCSI_CHANNEL_MONITOR_START;	
++	ndp->polling.is_enable = 1;
++	ndp->polling.status = 0;
++	ndp->polling.id = 32;
+ 	spin_unlock_irqrestore(&nc->lock, flags);
+ 
+ 	mod_timer(&nc->monitor.timer, jiffies + HZ);
+@@ -178,7 +170,12 @@
+ void ncsi_stop_channel_monitor(struct ncsi_channel *nc)
+ {
+ 	unsigned long flags;
+-
++#if defined(CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS) ||\
++	defined(CONFIG_SPX_FEATURE_POLL_FOR_ASYNC_RESET)		
++	struct ncsi_package *np = nc->package;
++	struct ncsi_dev_priv *ndp = np->ndp;
++#endif
++	
+ 	spin_lock_irqsave(&nc->lock, flags);
+ 	if (!nc->monitor.enabled) {
+ 		spin_unlock_irqrestore(&nc->lock, flags);
+@@ -186,7 +183,12 @@
+ 	}
+ 	nc->monitor.enabled = false;
+ 	spin_unlock_irqrestore(&nc->lock, flags);
+-
++#if defined(CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS) ||\
++	defined(CONFIG_SPX_FEATURE_POLL_FOR_ASYNC_RESET) 
++	/* Initial polling mode */ 	
++	ndp->polling.is_enable = 0;
++#endif
++	
+ 	del_timer_sync(&nc->monitor.timer);
+ }
+ 
+@@ -235,6 +237,7 @@
+ 
+ 	list_add_tail_rcu(&nc->node, &np->channels);
+ 	np->channel_num++;
++	nc->package->multi_channel=true;	
+ 	spin_unlock_irqrestore(&np->lock, flags);
+ 
+ 	return nc;
+@@ -434,7 +437,8 @@
+ 	struct ncsi_package *np;
+ 	struct ncsi_channel *nc;
+ 	unsigned long flags;
+-
++	int ret;
++	
+ 	/* If the request already had associated response,
+ 	 * let the response handler to release it.
+ 	 */
+@@ -446,6 +450,28 @@
+ 	}
+ 	spin_unlock_irqrestore(&ndp->lock, flags);
+ 
++	if(nr->retry > 0)
++	{		
++		nr->retry--;
++		nr->enabled = true;
++		mod_timer(&nr->timer, jiffies + (1 * HZ)/5);
++							
++		if(verbose){
++			cmd = (struct ncsi_cmd_pkt *)skb_network_header(nr->cmd);
++			printk("NCSI(%d,%d): Retry packet with type 0x%02x\n", (cmd->cmd.common.channel & 0xe0)>>5, (cmd->cmd.common.channel & 0x1f), cmd->cmd.common.type);		
++		}
++		
++		/* Send NCSI packet */
++		skb_get(nr->cmd);
++		ret = dev_queue_xmit(nr->cmd);
++		if (ret < 0) {
++			ncsi_free_request(nr);
++			return;
++		}
++		
++		return;
++	}
++	
+ 	if (nr->flags == NCSI_REQ_FLAG_NETLINK_DRIVEN) {
+ 		if (nr->cmd) {
+ 			/* Find the package */
+@@ -687,6 +713,68 @@
+ 	return 0;
+ }
+ 
++/* NCSI Set Flow control */
++int ncsi_set_flow_control(struct ncsi_dev_priv *ndp, unsigned char UserFlowcontrol)
++{	
++	struct ncsi_package *np;
++	struct ncsi_channel *nc;		
++	struct ncsi_cmd_arg nca;
++	int ret=0;	
++		
++	nca.ndp = ndp;
++	nca.req_flags = NCSI_REQ_FLAG_EVENT_DRIVEN;
++	nca.type = NCSI_PKT_CMD_SNFC;	
++	nca.bytes[0] = UserFlowcontrol;
++	
++	NCSI_FOR_EACH_PACKAGE(ndp, np) {		
++		NCSI_FOR_EACH_CHANNEL(np, nc) {			
++			nca.package = np->id;
++			nca.channel = nc->id;
++			ret = ncsi_xmit_cmd(&nca);
++		}
++	}	
++	
++	return ret;
++}
++
++/* NCSI Intel OEM Command */
++int ncsi_set_Vetobit(struct ncsi_dev_priv *ndp, unsigned char Vetobit)
++{		
++	struct ncsi_package *np;
++	struct ncsi_channel *nc;		
++	struct ncsi_cmd_arg nca;
++	unsigned char data[NCSI_OEM_INT_CMD_MAN_ONL_LEN];
++	int ret=0;		
++
++	nca.ndp = ndp;
++	nca.req_flags = 0;
++	nca.type = NCSI_PKT_CMD_OEM;	
++	nca.bytes[0] = Vetobit;
++	nca.payload = NCSI_OEM_INT_CMD_MAN_ONL_LEN;
++	
++	memset(data, 0, NCSI_OEM_INT_CMD_MAN_ONL_LEN);
++	*(unsigned int *)data = ntohl(NCSI_OEM_MFR_INT_ID);
++	data[4] = 0x20;
++	data[5] = 0x00;
++	data[6] = Vetobit;	
++	
++	NCSI_FOR_EACH_PACKAGE(ndp, np) {		
++		NCSI_FOR_EACH_CHANNEL(np, nc) {
++			if(nc->version.mf_id != NCSI_OEM_MFR_INT_ID){
++				printk("This NCSI chip not support Keep-PHY linkup.\n");
++				return -1;
++			}
++			nca.package = np->id;
++			nca.channel = nc->id;
++			nca.data = data;
++			ret = ncsi_xmit_cmd(&nca);
++		}
++	}	
++	
++	return ret;	
++	
++}
++
+ #if IS_ENABLED(CONFIG_NCSI_OEM_CMD_GET_MAC)
+ 
+ /* NCSI OEM Command APIs */
+@@ -879,7 +967,7 @@
+ 		}
+ 	}
+ 
+-	if (disable == enable)
++	if ((disable == enable) && (InitComplete == 1))
+ 		return -1;
+ 
+ 	if (!enable)
+@@ -1019,7 +1107,7 @@
+ 				nca.type = NCSI_PKT_CMD_DV;
+ 			} else {
+ 				nca.type = NCSI_PKT_CMD_EV;
+-				nca.bytes[3] = NCSI_CAP_VLAN_NO;
++				nca.bytes[3] = NCSI_CAP_VLAN_ONLY;
+ 			}
+ 			nd->state = ncsi_dev_state_config_sma;
+ 		} else if (nd->state == ncsi_dev_state_config_sma) {
+@@ -1070,7 +1158,11 @@
+ 		} else if (nd->state == ncsi_dev_state_config_ae) {
+ 			nca.type = NCSI_PKT_CMD_AE;
+ 			nca.bytes[0] = 0;
++#ifndef CONFIG_SPX_FEATURE_DISABLE_AEN_SUPPORT
+ 			nca.dwords[1] = nc->caps[NCSI_CAP_AEN].cap;
++#else
++			nca.dwords[1] = 0;
++#endif			
+ 			nd->state = ncsi_dev_state_config_gls;
+ 		} else if (nd->state == ncsi_dev_state_config_gls) {
+ 			nca.type = NCSI_PKT_CMD_GLS;
+@@ -1131,8 +1223,10 @@
+ 		spin_lock_irqsave(&ndp->lock, flags);
+ 		ndp->hot_channel = hot_nc;
+ 		spin_unlock_irqrestore(&ndp->lock, flags);
+-
+-		ncsi_start_channel_monitor(nc);
++		
++		if(!ndp->polling.is_enable)		
++			ncsi_start_channel_monitor(nc);	
++		
+ 		ncsi_process_next_channel(ndp);
+ 		break;
+ 	default:
+@@ -1186,7 +1280,7 @@
+ 			if (nc == hot_nc)
+ 				found = nc;
+ 
+-			ncm = &nc->modes[NCSI_MODE_LINK];
++			ncm = &nc->modes[NCSI_MODE_LINK];			
+ 			if (ncm->data[2] & 0x1) {
+ 				found = nc;
+ 				with_link = true;
+@@ -1258,6 +1352,11 @@
+ 		}
+ 	}
+ 
++#ifdef CONFIG_SPX_FEATURE_NCSI_DISABLE_HW_ARBITRATION
++	ndp->flags &= ~NCSI_DEV_HWA;
++	return false;
++#endif	
++	
+ 	if (has_channel) {
+ 		ndp->flags |= NCSI_DEV_HWA;
+ 		return true;
+@@ -1427,6 +1526,73 @@
+ 	}
+ }
+ 
++static void ncsi_aen_work(struct work_struct *work)
++{	
++	struct ncsi_dev_priv *ndp = container_of(work,
++			struct ncsi_dev_priv, aen_work);
++	struct ncsi_channel *nc, *tmp;
++	struct ncsi_channel_mode *ncm;	
++	struct ncsi_package *np;
++	unsigned long flags;
++
++	nc = ndp->aen_stat.nc ;	
++	
++	//Make sure NCSI command able to send
++	netif_carrier_on(ndp->ndev.dev);	
++	msleep(100);
++		
++		if (!ndp->multi_package && !nc->package->multi_channel) {
++			if (ndp->aen_stat.had_link) {
++				ndp->flags |= NCSI_DEV_RESHUFFLE;
++				ncsi_stop_channel_monitor(nc);
++				spin_lock_irqsave(&ndp->lock, flags);
++				list_add_tail_rcu(&nc->link, &ndp->channel_queue);
++				spin_unlock_irqrestore(&ndp->lock, flags);
++				ncsi_process_next_channel(ndp);
++				return;
++			}
++			/* Configured channel came up */
++			return;
++		}
++
++		if (ndp->aen_stat.had_link) {
++			ncm = &nc->modes[NCSI_MODE_TX_ENABLE];
++			if (ncsi_channel_is_last(ndp, nc)) {
++				/* No channels left, reconfigure */
++				ncsi_reset_dev(&ndp->ndev);
++				return;
++			} else if (ncm->enable) {
++				/* Need to failover Tx channel */
++				ncsi_update_tx_channel(ndp, nc->package, nc, NULL);
++			}
++		} else if (ndp->aen_stat.has_link && nc->package->preferred_channel == nc) {
++			/* Return Tx to preferred channel */
++			ncsi_update_tx_channel(ndp, nc->package, NULL, nc);
++		} else if (ndp->aen_stat.has_link) {
++			NCSI_FOR_EACH_PACKAGE(ndp, np) {
++				NCSI_FOR_EACH_CHANNEL(np, tmp) {
++					/* Enable Tx on this channel if the current Tx
++					 * channel is down.
++					 */
++					ncm = &tmp->modes[NCSI_MODE_TX_ENABLE];
++					if (ncm->enable &&
++					    !ncsi_channel_has_link(tmp)) {
++						ncsi_update_tx_channel(ndp, nc->package,
++								       tmp, nc);
++						break;
++					}
++				}
++			}
++		}
++
++		/* Leave configured channels active in a multi-channel scenario so
++		 * AEN events are still received.
++		 */	
++		ncsi_report_link(ndp, false);
++		
++		return;
++}
++
+ int ncsi_process_next_channel(struct ncsi_dev_priv *ndp)
+ {
+ 	struct ncsi_channel *nc;
+@@ -1482,6 +1648,21 @@
+ 		return ncsi_choose_active_channel(ndp);
+ 	}
+ 
++	if(InitComplete == 0){
++		struct ncsi_package *np_init;
++		struct ncsi_channel *nc_init;
++		
++		NCSI_FOR_EACH_PACKAGE(ndp, np_init) {
++			NCSI_FOR_EACH_CHANNEL(np_init, nc_init) {				
++				if(ncsi_channel_has_link(nc_init)){
++					if(ncsi_update_tx_channel(ndp, nc_init->package, NULL, nc_init) == 0)
++						break;
++				}
++			}
++		}
++	}
++	
++	InitComplete = 1;
+ 	ncsi_report_link(ndp, false);
+ 	return -ENODEV;
+ }
+@@ -1651,6 +1832,7 @@
+ 	INIT_LIST_HEAD(&ndp->channel_queue);
+ 	INIT_LIST_HEAD(&ndp->vlan_vids);
+ 	INIT_WORK(&ndp->work, ncsi_dev_work);
++	INIT_WORK(&ndp->aen_work, ncsi_aen_work);
+ 	ndp->package_whitelist = UINT_MAX;
+ 
+ 	/* Initialize private NCSI device */
+@@ -1673,6 +1855,17 @@
+ 	ndp->ptype.dev = dev;
+ 	dev_add_pack(&ndp->ptype);
+ 
++#if defined(CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS) ||\
++	defined(CONFIG_SPX_FEATURE_POLL_FOR_ASYNC_RESET) 
++	/* Initial polling mode */ 
++	ndp->polling.is_enable = 0;
++#else	
++	/* Disable polling mode */
++	ndp->polling.is_enable = 1;
++#endif
++	CreateProcSys();
++	InitComplete = 0;
++	
+ 	return nd;
+ }
+ EXPORT_SYMBOL_GPL(ncsi_register_dev);
+@@ -1680,7 +1873,13 @@
+ int ncsi_start_dev(struct ncsi_dev *nd)
+ {
+ 	struct ncsi_dev_priv *ndp = TO_NCSI_DEV_PRIV(nd);
+-
++		
++	if(InitComplete)	
++	{
++		ncsi_reset_dev(nd);
++		return 0;	
++	}
++	
+ 	if (nd->state != ncsi_dev_state_registered &&
+ 	    nd->state != ncsi_dev_state_functional)
+ 		return -ENOTTY;
+@@ -1705,6 +1904,9 @@
+ 	int old_state;
+ 	unsigned long flags;
+ 
++	if(InitComplete)
++		return;
++	
+ 	/* Stop the channel monitor on any active channels. Don't reset the
+ 	 * channel state so we know which were active when ncsi_start_dev()
+ 	 * is next called.
+@@ -1718,8 +1920,8 @@
+ 			old_state = nc->state;
+ 			spin_unlock_irqrestore(&nc->lock, flags);
+ 
+-			WARN_ON_ONCE(chained ||
+-				     old_state == NCSI_CHANNEL_INVISIBLE);
++			//WARN_ON_ONCE(chained ||
++				     //old_state == NCSI_CHANNEL_INVISIBLE);
+ 		}
+ 	}
+ 
+@@ -1800,6 +2002,8 @@
+ 		spin_lock_irqsave(&ndp->lock, flags);
+ 		ndp->flags &= ~NCSI_DEV_RESET;
+ 		spin_unlock_irqrestore(&ndp->lock, flags);
++		ndp->polling.id = 32;	
++		msleep(500);
+ 		return ncsi_choose_active_channel(ndp);
+ 	}
+ 
+@@ -1829,6 +2033,8 @@
+ 	list_del_rcu(&ndp->node);
+ 	spin_unlock_irqrestore(&ncsi_dev_lock, flags);
+ 
++	RemoveProcSys();
++	
+ 	kfree(ndp);
+ }
+ EXPORT_SYMBOL_GPL(ncsi_unregister_dev);
+--- linux-5.4.124/net/ncsi/ncsi-rsp.c	2021-09-30 10:10:32.846373210 +0800
++++ linux-5.4.124-new/net/ncsi/ncsi-rsp.c	2021-10-04 17:18:15.686170827 +0800
+@@ -318,7 +318,6 @@
+ 	struct ncsi_dev_priv *ndp = nr->ndp;
+ 	struct ncsi_channel *nc;
+ 	struct ncsi_channel_mode *ncm;
+-	unsigned long flags;
+ 
+ 	/* Find the package and channel */
+ 	rsp = (struct ncsi_rsp_gls_pkt *)skb_network_header(nr->rsp);
+@@ -330,16 +329,16 @@
+ 	ncm = &nc->modes[NCSI_MODE_LINK];
+ 	ncm->data[2] = ntohl(rsp->status);
+ 	ncm->data[3] = ntohl(rsp->other);
+-	ncm->data[4] = ntohl(rsp->oem_status);
+-
++	ncm->data[4] = ntohl(rsp->oem_status);		
++	
++#ifdef CONFIG_SPX_FEATURE_NCSI_GET_LINK_STATUS_FOR_NON_AEN_SUPPORTED_CONTROLLERS	   
++	if(ntohl(rsp->status)&0x1)
++		ndp->polling.status |= (0x1 << NCSI_CHANNEL_INDEX(rsp->rsp.common.channel));
++#endif			
++	
+ 	if (nr->flags & NCSI_REQ_FLAG_EVENT_DRIVEN)
+-		return 0;
+-
+-	/* Reset the channel monitor if it has been enabled */
+-	spin_lock_irqsave(&nc->lock, flags);
+-	nc->monitor.state = NCSI_CHANNEL_MONITOR_START;
+-	spin_unlock_irqrestore(&nc->lock, flags);
+-
++		return 0;	
++	
+ 	return 0;
+ }
+ 
+@@ -693,10 +692,19 @@
+ 	return 0;
+ }
+ 
++/* Response handler for Broadcom card */
++static int ncsi_rsp_handler_oem_int(struct ncsi_request *nr)
++{
++	//For now not feature need to implement 
++
++	return 0;
++}
++
+ static struct ncsi_rsp_oem_handler {
+ 	unsigned int	mfr_id;
+ 	int		(*handler)(struct ncsi_request *nr);
+ } ncsi_rsp_oem_handlers[] = {
++	{ NCSI_OEM_MFR_INT_ID, ncsi_rsp_handler_oem_int },
+ 	{ NCSI_OEM_MFR_MLX_ID, ncsi_rsp_handler_oem_mlx },
+ 	{ NCSI_OEM_MFR_BCM_ID, ncsi_rsp_handler_oem_bcm }
+ };
+@@ -1110,6 +1118,9 @@
+ 	struct ncsi_dev_priv *ndp;
+ 	struct ncsi_request *nr;
+ 	struct ncsi_pkt_hdr *hdr;
++#ifdef CONFIG_SPX_FEATURE_POLL_FOR_ASYNC_RESET
++	struct ncsi_rsp_pkt_hdr *h;
++#endif
+ 	unsigned long flags;
+ 	int payload, i, ret;
+ 
+@@ -1178,6 +1189,18 @@
+ 						      &nr->nlhdr,
+ 						      ret);
+ 		}
++
++#ifdef CONFIG_SPX_FEATURE_POLL_FOR_ASYNC_RESET
++		h = (struct ncsi_rsp_pkt_hdr *)skb_network_header(nr->rsp);
++
++		if((ntohs(h->reason) == NCSI_PKT_RSP_R_INTERFACE) && InitComplete == 1)
++		{
++			printk("Asynchronous Reset Detected !!!\n");			
++			printk("NCSI(%d.%d): Reset for NCSI Interface..\n",NCSI_PACKAGE_INDEX(h->common.channel), NCSI_CHANNEL_INDEX(h->common.channel));
++			InitComplete = 0;
++			ncsi_reset_dev(&ndp->ndev);
++		}
++#endif		
+ 		goto out;
+ 	}
+ 
+--- linux-5.4.124/net/ncsi/Makefile	2021-09-30 10:10:32.846373210 +0800
++++ linux-5.4.124-new/net/ncsi/Makefile	2021-10-04 17:27:44.072115890 +0800
+@@ -2,4 +2,4 @@
+ #
+ # Makefile for NCSI API
+ #
+-obj-$(CONFIG_NET_NCSI) += ncsi-cmd.o ncsi-rsp.o ncsi-aen.o ncsi-manage.o ncsi-netlink.o
++obj-$(CONFIG_NET_NCSI) += ncsi-cmd.o ncsi-rsp.o ncsi-aen.o ncsi-manage.o ncsi-netlink.o proc.o ethtool.o
+--- linux/net/ncsi/ncsi-cmd.c	2022-03-28 14:50:51.056014473 +0800
++++ linux-5.4.184/net/ncsi/ncsi-cmd.c	2022-03-28 17:39:12.504158650 +0800
+@@ -18,6 +18,7 @@
+ #include "internal.h"
+ #include "ncsi-pkt.h"
+ 
++extern int verbose;
+ static const int padding_bytes = 26;
+ 
+ u32 ncsi_calculate_checksum(unsigned char *data, int len)
+@@ -315,6 +316,42 @@
+ 	return nr;
+ }
+ 
++void pkt_hex_dump(struct sk_buff *skb)
++{
++    size_t len;
++    int rowsize = 16;
++    int i, l, linelen, remaining;
++    int li = 0;
++    uint8_t *data, ch; 
++
++    printk("Packet hex dump:\n");
++    data = (uint8_t *) skb_mac_header(skb);
++
++    if (skb_is_nonlinear(skb)) {
++        len = skb->data_len;
++    } else {
++        len = skb->len;
++    }
++
++    remaining = len;
++    for (i = 0; i < len; i += rowsize) {
++        printk("%06d\t", li);
++
++        linelen = min(remaining, rowsize);
++        remaining -= rowsize;
++
++        for (l = 0; l < linelen; l++) {
++            ch = data[l];
++            printk(KERN_CONT "%02X ", (uint32_t) ch);
++        }
++
++        data += linelen;
++        li += 10; 
++
++        printk(KERN_CONT "\n");
++    }
++}
++
+ int ncsi_xmit_cmd(struct ncsi_cmd_arg *nca)
+ {
+ 	struct ncsi_cmd_handler *nch = NULL;
+@@ -384,8 +421,12 @@
+ 	 * connection a 1 second delay should be sufficient.
+ 	 */
+ 	nr->enabled = true;
+-	mod_timer(&nr->timer, jiffies + 1 * HZ);
+-
++	nr->retry = 2;
++	mod_timer(&nr->timer, jiffies + (1 * HZ)/5);
++	
++	if(verbose)
++		printk("NCSI(%d,%d): Send packet with type 0x%02x\n", nca->package,  nca->channel, nca->type);
++	
+ 	/* Send NCSI packet */
+ 	skb_get(nr->cmd);
+ 	ret = dev_queue_xmit(nr->cmd);
+@@ -394,5 +435,10 @@
+ 		return ret;
+ 	}
+ 
++	//Dump Packet Payload
++	if(verbose & 0x2)
++		if(nr->cmd)
++			pkt_hex_dump(nr->cmd);	
++	
+ 	return 0;
+ }
+--- linux-5.4.124/net/ncsi/proc.c	2021-10-04 17:32:53.975469206 +0800
++++ linux-5.4.124-new/net/ncsi/proc.c	2021-09-29 16:56:46.851865600 +0800
+@@ -0,0 +1,458 @@
++/*
++ ****************************************************************
++ **                                                            **
++ **    (C)Copyright 2009-2015, American Megatrends Inc.        **
++ **                                                            **
++ **            All Rights Reserved.                            **
++ **                                                            **
++ **        5555 Oakbrook Pkwy Suite 200, Norcross,             **
++ **                                                            **
++ **        Georgia - 30093, USA. Phone-(770)-246-8600.         **
++ **                                                            **
++ ****************************************************************
++ */
++#include <linux/version.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/sysctl.h>
++#include <linux/proc_fs.h>
++#include <linux/delay.h>
++#include <linux/netdevice.h>
++#include <linux/fs.h>
++#include <net/net_namespace.h>
++#include <net/ncsi.h>
++
++#include "internal.h"
++#include "ncsi-pkt.h"
++
++static int proc_enable(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,loff_t* pos);  
++static int proc_setvlanid(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,loff_t* pos);
++static int proc_vetobit(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,loff_t* pos);
++static int proc_detect(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,loff_t* pos);
++static int proc_setflowcontrol(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,
++        					loff_t* pos);
++static int proc_initcomplete(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,
++        					loff_t* pos);
++static int proc_channellist(struct ctl_table *ctl,int write,void *buffer,size_t *lenp,loff_t* pos);
++
++static struct ctl_table_header *sys_ncsi  = NULL;
++
++int verbose = 0;
++int UserPackageID = 0;
++int UserChannelID = 1;
++#ifdef CONFIG_SPX_FEATURE_NCSI_DEFAULT_INTERFACE
++char UserInterface[8] = CONFIG_SPX_FEATURE_NCSI_DEFAULT_INTERFACE;
++#else
++char UserInterface[8] = "eth1";
++#endif
++int UserEnable = 0;
++u16 UserVlanID=0;
++u16 UserVlanID_old=0;
++int UserFlowcontrol=0;
++int UserSpeed=0;
++int UserDuplex=1;
++int UserSetLink=0;
++int UserAutoNeg=0;
++int UserDetect=0;
++int InitComplete=1;
++#ifdef CONFIG_SPX_FEATURE_NCSI_RESET_INTERFACE_IN_USER_SETTINGS
++int UserInitEnabled=0;
++#endif
++
++#ifdef CONFIG_SPX_FEATURE_NCSI_KEEP_PHY_LINK_UP
++int UserVetoBit=1;
++#else
++int UserVetoBit=0;
++#endif
++int UserControlVetoBit=0;
++
++#ifdef CONFIG_SPX_FEATURE_NCSI_AUTO_FAILOVER
++int UserAuto=1;
++#else
++int UserAuto=0;
++#endif
++int EnableSetLink = 1;
++
++unsigned long ChannelList[NCSI_MAX_PACKAGE * NCSI_MAX_CHANNEL * 2] = {0};
++int ReEnable = 0;
++int UserSetMAC = 0;
++
++static struct ctl_table SysNcsiTable[] = 
++{
++    {.procname="DebugLevel", 		.data=&verbose,       		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="PackageID",  		.data=&UserPackageID, 		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="ChannelID",  		.data=&UserChannelID, 		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="Interface",  		.data=&UserInterface, 		.maxlen=sizeof(UserInterface), .mode=0644, .proc_handler=&proc_dostring },
++    {.procname="Enable"   ,  		.data=&UserEnable,    		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_enable },
++    {.procname="VlanID"   ,  		.data=&UserVlanID,    		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_setvlanid },
++    {.procname="UserSpeed"    ,  	.data=&UserSpeed,    		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="UserDuplex"   ,  	.data=&UserDuplex,   		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="UserAutoNeg"   ,  	.data=&UserAutoNeg,   		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="EnableSetLink"   ,  .data=&EnableSetLink,   	.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="FailOver",  		.data=&UserAuto, 			.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="VetoBit",  			.data=&UserVetoBit, 		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++    {.procname="ControlVetoBit"  ,  .data=&UserControlVetoBit,  .maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_vetobit },
++    {.procname="Detect"   ,  		.data=&UserDetect,    		.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_detect },
++    {.procname="Flowcontrol", 		.data=&UserFlowcontrol, 	.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_setflowcontrol },
++    {.procname="InitComplete"   ,   .data=&InitComplete,   		.maxlen=sizeof(int), .mode=0444, .proc_handler=&proc_initcomplete },
++#ifdef CONFIG_SPX_FEATURE_NCSI_RESET_INTERFACE_IN_USER_SETTINGS
++    {.procname="UserInitEnabled" ,  .data=&UserInitEnabled,   	.maxlen=sizeof(int), .mode=0644, .proc_handler=&proc_dointvec },
++#endif
++    {.procname="ChannelList"   ,  	.data=ChannelList,    		.maxlen=sizeof(ChannelList), .mode=0644, .proc_handler=&proc_channellist },
++    {  }
++};
++
++#define PROC_DIR	"ractrends"	
++
++static struct ctl_table_header *
++AddSysctlTable(char *ModuleName,struct ctl_table* ModuleTable)
++{
++	struct ctl_table *root_table;
++	struct ctl_table *module_root_table;
++	struct ctl_table_header *table_header;
++
++	/* Create the root directory under /proc/sys*/
++	root_table = kmalloc(sizeof(struct ctl_table)*2,GFP_KERNEL);
++	if (!root_table)
++		return NULL;
++
++	/* Create the module directory under /proc/sys/ractrends*/
++	module_root_table = kmalloc(sizeof(struct ctl_table)*2,GFP_KERNEL);
++	if (!module_root_table)
++	{
++		kfree(root_table);
++		return NULL;
++	}
++	
++	/* Fill up root table */	
++	memset(root_table,0,sizeof(struct ctl_table)*2);
++
++	root_table[0].procname  = PROC_DIR;
++	root_table[0].data		= NULL;
++	root_table[0].maxlen 	= 0;
++	root_table[0].mode		= 0555;		/* _r_xr_xr_x */
++	root_table[0].child 	= module_root_table;
++
++	/* Fill up the module root table */
++	memset(module_root_table,0,sizeof(struct ctl_table)*2);
++
++	module_root_table[0].procname = ModuleName;
++	module_root_table[0].data		= NULL;
++	module_root_table[0].maxlen 	= 0;
++	module_root_table[0].mode		= 0555;		/* _r_xr_xr_x */
++	module_root_table[0].child 	= ModuleTable;
++
++
++	table_header = register_sysctl_table(root_table);
++
++	return table_header;
++
++}
++
++static void
++RemoveSysctlTable(struct ctl_table_header *table_header)
++{
++	struct ctl_table *root_table;
++
++	if (!table_header)
++		return;
++			
++	/* Hack: Get the root_table from table_header : Refer sysctl.c */
++	root_table = table_header->ctl_table_arg;
++		
++	/* unregister the sysctl table from kernel */		
++	unregister_sysctl_table(table_header);
++
++	if (!root_table)		
++		return;
++	
++	/* free module root table */
++	if (root_table->child)
++			kfree(root_table->child);
++
++	/* free the root table */
++	if(root_table)
++		kfree(root_table);
++	return;
++}
++
++/* This is a function Called when something is written to sysctl "Enable " */
++static
++int 
++proc_enable(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++	int retval;
++	struct net_device *dev;
++	struct ncsi_dev *nd;
++	struct ncsi_dev_priv *ndp;
++	struct ncsi_package *np;
++	
++	retval = proc_dointvec(ctl,write,buffer,lenp,pos);
++	
++	if (UserEnable != 0 &&  UserEnable != 1)
++	{
++		printk(KERN_DEBUG "NCSI: Sysctl \"Enable\" should be 1 or 0 \n");
++		return retval;
++	}
++	
++	if( UserAuto != 0 && UserAuto != 1 )
++	{
++		printk(KERN_DEBUG "NCSI: Sysctl \"Auto\" should be 1 or 0 \n");
++		return retval;
++	}	
++	
++	dev = dev_get_by_name(&init_net,UserInterface);
++	if (dev == NULL)
++	{
++		printk("NCSI: ERROR: Unable to get device for %s\n",UserInterface);
++		return retval;
++	}
++		
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(dev);
++	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
++	if (!ndp)
++		return -ENODEV;	
++	
++	np = ncsi_find_package(ndp, UserPackageID);
++	if (!np) {
++		printk("NCSI: ERROR: Unable to find package %d\n",UserPackageID);
++		return retval;
++	}
++		
++	if(UserAuto)
++		np->channel_whitelist = UINT_MAX;
++	else
++		np->channel_whitelist = 0x1 << UserChannelID;	
++	
++	ncsi_reset_dev(&ndp->ndev);
++	
++ 	return retval;
++} 
++
++/* This is a function Called when something is written to sysctl "Detect " */
++static
++int 
++proc_detect(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++    int retval;
++	struct net_device *dev;
++	struct ncsi_dev *nd;
++	
++    retval = proc_dointvec(ctl,write,buffer,lenp,pos);
++
++    if (UserDetect == 0)
++        return retval;
++    
++    if (UserDetect != 1)
++    {
++        printk("NCSI: Sysctl \"Detect\" should be 1 or 0 \n");
++        return retval;
++    }
++
++	dev = dev_get_by_name(&init_net,UserInterface);
++	if (dev == NULL)
++	{
++		printk("NCSI: ERROR: Unable to get device for %s\n",UserInterface);
++		return retval;
++	}
++		
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(dev);
++    
++#ifdef CONFIG_SPX_FEATURE_NCSI_MANUAL_DETECT
++    ncsi_stop_dev(nd);
++    msleep(4000);
++    ncsi_start_dev(nd);
++#endif
++    return retval;
++} 
++
++
++/* This is a function Called when something is written to sysctl "VlanID " */
++static
++int
++proc_setvlanid(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++	int retval;
++	struct net_device *dev;
++	
++	retval = proc_dointvec(ctl,write,buffer,lenp,pos);
++
++	if((UserVlanID == 1) || (UserVlanID > 4094))
++	{
++		printk("Invalid VLAN ID value\n");
++		return retval;
++	}
++
++	dev = dev_get_by_name(&init_net,UserInterface);
++	if (dev == NULL)
++	{
++		printk("NCSI: ERROR: Unable to get device for %s\n",UserInterface);
++		return retval;
++	}
++	
++	if(UserVlanID == 0)
++		ncsi_vlan_rx_kill_vid(dev, 0, UserVlanID_old);
++	else
++	{
++		ncsi_vlan_rx_kill_vid(dev, 0, UserVlanID_old);
++		ncsi_vlan_rx_add_vid(dev, 0, UserVlanID);
++	}
++	
++	UserVlanID_old = UserVlanID;
++	
++ 	return retval;
++}
++
++/* This is a function Called when something is written to sysctl "Detect " */
++static
++int 
++proc_vetobit(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++	int retval;
++	struct net_device *dev;
++	struct ncsi_dev *nd;
++	struct ncsi_dev_priv *ndp;
++	
++	retval = proc_dointvec(ctl,write,buffer,lenp,pos);
++
++	if (UserControlVetoBit== 0)
++		return retval;
++	
++	if (UserControlVetoBit!= 1)
++	{
++		printk(KERN_DEBUG "NCSI: Sysctl \"ControlVetoBit\" should be 1 or 0 \n");
++		return retval;
++	}
++	
++	dev = dev_get_by_name(&init_net,UserInterface);
++	if (dev == NULL)
++	{
++		printk("NCSI: ERROR: Unable to get device for %s\n",UserInterface);
++		return retval;
++	}
++		
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(dev);
++	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
++	if (!ndp)
++		return -ENODEV;	
++	
++#ifdef CONFIG_SPX_FEATURE_NCSI_KEEP_PHY_LINK_UP
++	ncsi_set_Vetobit(ndp, UserVetoBit);
++#else
++	printk("Setting Keep PHY Link Feature is not Enabled\n");
++#endif		
++	
++ 	return retval;
++} 
++
++/* This is a function Called when something is written to sysctl "Flow Control "*/
++static
++int
++proc_setflowcontrol(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++	int retval;
++	struct net_device *dev;
++	struct ncsi_dev *nd;
++	struct ncsi_dev_priv *ndp;
++	
++	retval = proc_dointvec(ctl,write,buffer,lenp,pos);
++
++	if ((UserFlowcontrol < 0) || (UserFlowcontrol > 3))
++	{
++		printk("Invalid Flow Control value\n");
++		return retval;
++	}
++	
++	dev = dev_get_by_name(&init_net,UserInterface);
++	if (dev == NULL)
++	{
++		printk("NCSI: ERROR: Unable to get device for %s\n",UserInterface);
++		return retval;
++	}
++		
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(dev);
++	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
++	if (!ndp)
++		return -ENODEV;				
++	
++#ifdef CONFIG_SPX_FEATURE_NCSI_DEFAULT_FLOW_CONTROL
++	ncsi_set_flow_control(ndp, UserFlowcontrol);
++#else
++	printk("Setting Flow Control Feature is not Enabled\n");
++#endif
++	return 0;
++	
++}
++
++/* This is a function Called when something is written to proc entry "InitComplete" */
++
++static
++int
++proc_initcomplete(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++	int retval;
++	
++	retval = proc_dointvec(ctl,write,buffer,lenp,pos);
++
++	return 0;
++	
++}
++
++static
++int
++proc_channellist(struct ctl_table *ctl,int write,void *buffer,size_t *lenp, loff_t *pos)
++{
++	struct net_device *dev;
++	struct ncsi_dev *nd;
++	struct ncsi_dev_priv *ndp;
++	struct ncsi_package *np;
++	struct ncsi_channel *nc;
++	int j = 0;
++	
++	dev = dev_get_by_name(&init_net,UserInterface);
++	if (dev == NULL)
++	{
++		printk("NCSI: ERROR: Unable to get device for %s\n",UserInterface);
++		return -ENODEV;
++	}
++		
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(dev);
++	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
++	if (!ndp)
++		return -ENODEV;		
++	
++    NCSI_FOR_EACH_PACKAGE(ndp, np) {
++    	NCSI_FOR_EACH_CHANNEL(np, nc) {
++    		ChannelList[j++] = np->id;
++    		ChannelList[j++] = nc->id;
++    	}
++    }
++    
++	return proc_dointvec(ctl,write,buffer,lenp,pos);
++}
++
++int 
++CreateProcSys(void)
++{	
++	sys_ncsi = AddSysctlTable("ncsi",&SysNcsiTable[0]);
++	if (sys_ncsi == NULL)
++	{
++		printk("NCSI: ERROR: Unable to create /proc/sys/ractrends/ncsi \n");
++	}
++	return 0;
++}
++
++int
++RemoveProcSys(void)
++{
++	if (sys_ncsi)
++		RemoveSysctlTable(sys_ncsi);
++
++	return 0;
++}
++
+--- linux-5.4.124/include/net/ncsi.h	2021-09-30 10:10:30.502365612 +0800
++++ linux-5.4.124-new/include/net/ncsi.h	2021-10-04 17:33:53.791364216 +0800
+@@ -36,6 +36,7 @@
+ int ncsi_start_dev(struct ncsi_dev *nd);
+ void ncsi_stop_dev(struct ncsi_dev *nd);
+ void ncsi_unregister_dev(struct ncsi_dev *nd);
++int NCSI_Net_Driver_Register(struct net_device *dev);
+ #else /* !CONFIG_NET_NCSI */
+ static inline int ncsi_vlan_rx_add_vid(struct net_device *dev, __be16 proto, u16 vid)
+ {
+@@ -65,6 +66,10 @@
+ static inline void ncsi_unregister_dev(struct ncsi_dev *nd)
+ {
+ }
++
++static int NCSI_Net_Driver_Register(struct net_device *dev){
++	return 0;
++}
+ #endif /* CONFIG_NET_NCSI */
+ 
+ #endif /* __NET_NCSI_H */
+--- linux-5.4.124/net/ncsi/ethtool.c	2021-10-04 17:34:51.375267678 +0800
++++ linux-5.4.124-new/net/ncsi/ethtool.c	2021-09-29 16:56:46.515889700 +0800
+@@ -0,0 +1,484 @@
++/*
++ ****************************************************************
++ **                                                            **
++ **    (C)Copyright 2009-2015, American Megatrends Inc.             **
++ **                                                            **
++ **            All Rights Reserved.                            **
++ **                                                            **
++ **        5555 Oakbrook Pkwy Suite 200, Norcross,             **
++ **                                                            **
++ **        Georgia - 30093, USA. Phone-(770)-246-8600.         **
++ **                                                            **
++ ****************************************************************
++ */
++/****************************************************************
++  Author	: Samvinesh Christopher
++
++  Module	: Ethtool support for Network interface with NCSI
++
++  Revision	: 1.0  
++
++  Changelog : 1.0 - Initial Version  [SC]
++
++ *****************************************************************/
++#include <linux/version.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/sysctl.h>
++#include <linux/proc_fs.h>
++#include <net/net_namespace.h>
++#include <linux/netdevice.h>
++#include <linux/fs.h>
++#include <net/ncsi.h>
++
++#include "internal.h"
++#include "ncsi-pkt.h"
++
++
++#define DRV_NAME        "NCSI"
++#define DRV_FW		"NCSI 1.0"    
++/* Driver Modules Version Number */
++#define NCSI_DRIVER_MAJOR  1
++#define NCSI_DRIVER_MINOR  1
++
++#define MAX_IF_NAME_LEN 8
++#define MAX_NET_IF 	(CONFIG_SPX_FEATURE_GLOBAL_NIC_COUNT)
++
++/* Link Partner values valid SerDes=0 AutoNegFlag=1 and AutoNegComplete=1 */
++
++#define LINK_STATUS_UP			0x00000001
++#define LINK_AUTO_NEG_FLAG		0x00000020
++#define LINK_AUTO_NEG_COMPLETE	0x00000040
++#define LINK_PARALLEL_DET_FLAG	0x00000080
++#define LINK_PARTNER_1000TFD	0x00000200
++#define LINK_PARTNER_1000THD	0x00000400
++#define LINK_PARTNER_100T4		0x00000800
++#define LINK_PARTNER_100TXFD	0x00001000
++#define LINK_PARTNER_100TXHD	0x00002000
++#define LINK_PARTNER_10TFD		0x00004000
++#define LINK_PARTNER_10THD		0x00008000
++#define LINK_TX_FLOW_FLAG		0x00010000
++#define LINK_RX_FLOW_FLAG		0x00020000
++#define LINK_SERDES				0x00100000
++#define LINK_OEM_FIELD_VALID	0x00200000
++
++#define LINK_PARTNER_FLOW_MASK	0x000C0000
++#define LINK_PARTNER_NO_PAUSE	0x00000000
++#define LINK_PARTNER_SYM_PAUSE	0x00040000
++#define LINK_PARTNER_ASYM_PAUSE	0x00080000
++#define LINK_PARTNER_BOTH_PAUSE	0x000C0000
++
++#define LINK_SPEED_DUPLEX_MASK	0x0000001E
++#define LINK_10THD			(0x1 << 1)			
++#define LINK_10TFD			(0x2 << 1)			
++#define LINK_100THD			(0x3 << 1)			
++#define LINK_100T4			(0x4 << 1)			
++#define LINK_100TFD			(0x5 << 1)			
++#define LINK_1000THD			(0x6 << 1)			
++#define LINK_1000TFD		(0x7 << 1)			
++#define LINK_10GT			(0x8 << 1)
++#define LINK_25GT			(0xa << 1)
++
++
++/* 
++   The folllowing two should be defined in the network driver. 
++   If not defined, NCSI driver will not load 
++*/
++
++extern int register_ethtool_override(struct ethtool_ops *ops , int ethindex);
++extern int unregister_ethtool_override(int ethindex);
++
++
++/* ethtool_ops function prototypes */
++static void ncsi_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *info);
++static u32 ncsi_get_link(struct net_device *netdev);
++static int ncsi_nway_reset(struct net_device *netdev);
++static int ncsi_ethtool_get_link_ksettings(struct net_device *netdev, struct ethtool_link_ksettings *cmd);
++static int ncsi_ethtool_set_link_ksettings(struct net_device *netdev, const struct ethtool_link_ksettings *cmd);
++
++extern int UserSpeed;
++extern int UserDuplex;
++extern int UserAutoNeg;
++extern int EnableSetLink;
++
++static struct ethtool_ops ncsi_ops =
++{
++        .get_drvinfo  = ncsi_get_drvinfo,
++        .get_link     = ncsi_get_link,
++        .nway_reset   = ncsi_nway_reset,
++        .get_link_ksettings	= ncsi_ethtool_get_link_ksettings,
++        .set_link_ksettings	= ncsi_ethtool_set_link_ksettings,
++};
++
++
++static
++int 
++GetEthIndex(char *deviceName)
++{
++	char interfaceName[IFNAMSIZ+1];
++	int i = 0;
++
++	memset(interfaceName, 0, sizeof(interfaceName));
++
++	for (i = 0; i < MAX_NET_IF; i++)
++	{
++		snprintf(interfaceName, sizeof(interfaceName), "%s%d", "eth", i);
++		if (strcmp(deviceName, interfaceName) == 0) 
++			return i;
++	}
++
++	return -1;
++}
++
++
++int  
++NCSI_Net_Driver_Register(struct net_device *dev)
++{
++
++	int ethindex;	
++	
++	/* Validate network device */
++	if (dev == NULL)
++		return 1;
++
++	/* Get and Validate device index */
++	ethindex = GetEthIndex(dev->name);
++	if (ethindex == -1)
++		return 1;
++	/* Override the ethtool operations */
++	dev->ethtool_ops = &ncsi_ops;	
++	
++	return register_ethtool_override(&ncsi_ops , ethindex);
++}
++
++
++int  
++NCSI_Net_Driver_DeRegister(struct net_device *dev)
++{
++	int ethindex;
++
++	/* Validate network device */
++	if (dev == NULL)
++		return 1;
++
++	/* Get and Validate device index */
++	ethindex = GetEthIndex(dev->name);
++	if (ethindex == -1)
++		return 1;
++
++	return unregister_ethtool_override(ethindex);
++
++}
++
++
++static void 
++ncsi_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *info)
++{
++	if(snprintf(info->driver,sizeof(info->driver),"%s",DRV_NAME)>=(signed)sizeof(info->driver))
++	printk("ncsi_get_drvinfo-source buffer truncated\n");
++	sprintf(info->version,"%d.%d",NCSI_DRIVER_MAJOR,NCSI_DRIVER_MINOR);
++	if(snprintf(info->fw_version,sizeof(info->fw_version),"%s",DRV_FW)>=(signed)sizeof(info->fw_version))
++	printk("ncsi_get_drvinfo-source buffer truncated\n");
++    return;
++}
++
++static u32
++ncsi_get_link(struct net_device *netdev)
++{
++	struct ncsi_dev *nd;	
++	
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(netdev);
++	if (!nd) {
++		netdev_warn(netdev, "NCSI: No net_device?\n");
++		return 0;
++	}					
++	
++	return nd->link_up;
++}
++
++static int
++ncsi_nway_reset(struct net_device *netdev)
++{
++#if 0	
++	NCSI_IF_INFO *info;
++	UINT32 LinkStatus;
++	int index;
++	int err=-EINVAL;
++
++	info = GetInterfaceInfo(netdev);
++	if (info == NULL)
++		return err;
++
++	/* If link is up on any of the enabled channel, then return link up */
++	for (index = 0; index < MAX_CHANNELS ; index ++)
++	{
++		if (info->ChannelInfo[index].Enabled == 0)
++			continue;
++
++		msleep(1000); //Adding a delay of 1 second before issuing GetLinkStatus command to get the proper link status
++		if (NCSI_Issue_GetLinkStatus(info,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID,&LinkStatus) != NCSI_ERR_SUCCESS)
++		{
++			printk("NCSI(%s): ERROR: GetLinkStatus(%d.%d) Failed \n",netdev->name,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID);
++			continue;
++		}
++
++		/* Auto-Ngotiation is turned off by someone. So should not turn on */
++	//	if (!(LinkStatus & LINK_AUTO_NEG_FLAG))
++	//		continue;
++
++		if (EnableSetLink != 0)
++		{
++			/* Isuse SetLink to Turn on Auto Negotiaiton */
++			if (NCSI_Issue_SetLink(info,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID,1/*Auto Neg*/,0,0) != NCSI_ERR_SUCCESS)
++			{
++				printk("NCSI(%s): ERROR: SetLink AutoNegotiation (%d.%d) Failed \n",netdev->name,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID);
++				continue;
++			}
++		}
++		
++		printk(KERN_DEBUG "NCSI(%s) : SetLink (%d.%d) Restart AutoNegotiation Success \n",netdev->name,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID);
++		err = 0;
++	}
++	
++	/* Autonegotiation might have change the link properties*/
++	InitEthtoolInfo(info);
++	
++	return err;	
++#endif
++	return 0;
++}
++
++#if 0
++static int  
++ncsi_set_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
++{
++	NCSI_IF_INFO *info;
++	int index;
++	int err=-EINVAL,retval;
++	UINT32 NcsiSpeed=LINK_ENABLE_100_MBPS;
++	UINT32 NcsiDuplex=LINK_ENABLE_FULL_DUPLEX;
++
++
++	info = GetInterfaceInfo(netdev);
++	if (info == NULL)
++		return err;
++
++	/* Validate Inputs */
++	if (ecmd->speed != SPEED_10 &&
++            ecmd->speed != SPEED_100 &&
++	    ecmd->speed != SPEED_1000 &&
++	    ecmd->speed != SPEED_10000)
++                return -EINVAL;
++        if (ecmd->duplex != DUPLEX_HALF && ecmd->duplex != DUPLEX_FULL)
++                return -EINVAL;
++        if (ecmd->autoneg != AUTONEG_DISABLE && ecmd->autoneg != AUTONEG_ENABLE)
++                return -EINVAL;
++
++	/* Convert Speed and Duplex to NCSI values */
++	if (ecmd->speed == SPEED_10)
++		NcsiSpeed =  LINK_ENABLE_10_MBPS;
++	if (ecmd->speed == SPEED_100)
++		NcsiSpeed =  LINK_ENABLE_100_MBPS;
++	if (ecmd->speed == SPEED_1000)
++		NcsiSpeed =  LINK_ENABLE_1000_MBPS;
++	if (ecmd->speed == SPEED_10000)
++	        NcsiSpeed =  LINK_ENABLE_10_GBPS;
++	if (ecmd->speed == SPEED_25000)
++		NcsiSpeed =  LINK_ENABLE_25_GBPS;
++
++	if (ecmd->duplex == DUPLEX_FULL)
++		NcsiDuplex =  LINK_ENABLE_FULL_DUPLEX;
++	if (ecmd->duplex == DUPLEX_HALF)
++		NcsiDuplex =  LINK_ENABLE_HALF_DUPLEX;
++
++
++	/* For every enabled channel do the settings */
++	for (index = 0; index < MAX_CHANNELS ; index ++)
++	{
++		if (info->ChannelInfo[index].Enabled == 0)
++			continue;
++
++		if (EnableSetLink != 0)
++		{
++			if (ecmd->autoneg == AUTONEG_ENABLE) 
++			{
++				retval = NCSI_Issue_SetLink(info,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID,1,0,0);
++				if (retval == NCSI_ERR_SUCCESS)
++					err = 0;			/* if any one succeeds, it is success */
++				else
++					printk("NCSI(%s): ERROR: SetLink AutoNegotiation (%d.%d) Failed \n",netdev->name,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID);
++			}
++			else
++			{
++				retval = NCSI_Issue_SetLink(info,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID,0,NcsiSpeed,NcsiDuplex);
++				if (retval == NCSI_ERR_SUCCESS)
++					err = 0;			/* if any one succeeds, it is success */
++				else
++					printk("NCSI(%s): ERROR: SetLink Force Speed/Duplex (%d.%d) Failed \n",netdev->name,info->ChannelInfo[index].PackageID,info->ChannelInfo[index].ChannelID);
++			}
++		}
++
++	}
++	msleep (3000);
++	/* Force settings might have change the link properties*/
++	InitEthtoolInfo(info);
++	return err;	
++}
++#endif
++static int  
++ncsi_ethtool_set_link_ksettings(struct net_device *netdev, const struct ethtool_link_ksettings *cmd)
++{
++#if 0	
++    struct ethtool_cmd ecmd;
++    memset(&ecmd,0,sizeof(struct ethtool_cmd));
++    ethtool_convert_link_mode_to_legacy_u32(&ecmd.supported,cmd->link_modes.supported);
++    ethtool_convert_link_mode_to_legacy_u32(&ecmd.advertising,cmd->link_modes.advertising);
++    ethtool_convert_link_mode_to_legacy_u32(&ecmd.lp_advertising,cmd->link_modes.lp_advertising);
++	ecmd.speed      = cmd->base.speed;
++	ecmd.duplex     = cmd->base.duplex;
++	ecmd.autoneg    = cmd->base.autoneg;
++	ecmd.port       = cmd->base.port;
++    return ncsi_set_settings(netdev, &ecmd);
++#else 
++    //Due setting link is not usable at HOST on, hence remove it.
++    return 0;
++#endif
++}
++
++
++static int 
++ncsi_ethtool_get_link_ksettings(struct net_device *netdev, struct ethtool_link_ksettings *cmd)
++{
++	struct ncsi_dev *nd;
++	struct ncsi_dev_priv *ndp;
++	struct ncsi_package *np;
++	struct ncsi_channel *nc;
++	struct ethtool_cmd ecmd;
++	u32 LinkStatus = 0;
++	
++	/* Find the NCSI device */
++	nd = ncsi_find_dev(netdev);
++	if (!nd) {
++		netdev_warn(netdev, "NCSI: No net_device?\n");
++		return 0;
++	}
++    
++	if(!nd->link_up)
++		return 0; //Not link-up
++	
++	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
++	if (!ndp)
++		return -ENODEV;	
++	
++    NCSI_FOR_EACH_PACKAGE(ndp, np) {
++    	NCSI_FOR_EACH_CHANNEL(np, nc) {
++    		if(ncsi_channel_has_link(nc)){	
++    			LinkStatus = nc->modes[NCSI_MODE_LINK].data[2];
++				goto update_ethtool;
++    		}
++    	}
++    }
++    
++update_ethtool:            
++    memset(&ecmd,0,sizeof(struct ethtool_cmd));
++    
++	/* Default values */
++	ecmd.advertising = 0;
++	ecmd.speed =  SPEED_10;
++	ecmd.duplex  = DUPLEX_HALF;
++
++	/* NCSI supported speeds */
++	ecmd.supported = (SUPPORTED_Autoneg |
++            SUPPORTED_10baseT_Half   | SUPPORTED_10baseT_Full   |
++            SUPPORTED_100baseT_Half  | SUPPORTED_100baseT_Full  |
++            SUPPORTED_1000baseT_Full | SUPPORTED_10000baseT_Full|
++            SUPPORTED_10000baseT_Full);
++
++	/* Not applicable to NCSI. Set some values */
++	ecmd.port = 0;
++	ecmd.transceiver = 0;
++
++	/* If Auto negotitaton is enabled */
++	if (LinkStatus & LINK_AUTO_NEG_FLAG)
++	{
++		ecmd.advertising |= ADVERTISED_Autoneg;
++		ecmd.autoneg = AUTONEG_ENABLE;
++	}
++
++	/* Get the Speed and Duplex */
++	switch (LinkStatus & LINK_SPEED_DUPLEX_MASK) 
++	{
++		case LINK_10THD:
++			ecmd.speed =  SPEED_10;
++			ecmd.duplex  = DUPLEX_HALF;
++			break;
++		case LINK_10TFD:		
++			ecmd.speed =  SPEED_10;
++			ecmd.duplex  = DUPLEX_FULL;
++			break;
++		case LINK_100THD:			
++			ecmd.speed =  SPEED_100;
++			ecmd.duplex  = DUPLEX_HALF;
++			break;
++		case LINK_100TFD:						
++			ecmd.speed =  SPEED_100;
++			ecmd.duplex  = DUPLEX_FULL;
++			break;
++		case LINK_1000THD:						
++			ecmd.speed =  SPEED_1000 ;
++			ecmd.duplex  = DUPLEX_HALF;
++			break;
++		case LINK_1000TFD:		
++			ecmd.speed =  SPEED_1000 ;
++			ecmd.duplex  = DUPLEX_FULL;
++			break;
++		case LINK_10GT:			
++			ecmd.duplex = DUPLEX_FULL;
++			ecmd.speed   = SPEED_10000;   
++			break;
++		case LINK_100T4:						
++			ecmd.speed = SPEED_100;
++			ecmd.duplex = DUPLEX_FULL;	
++			break;
++		case LINK_25GT:			
++			ecmd.duplex  = DUPLEX_FULL;
++			ecmd.speed   =  SPEED_25000;	
++			break;	
++		default:
++			ecmd.speed = SPEED_10;
++			ecmd.duplex = DUPLEX_HALF;
++			break;
++	}
++
++	// Change the proc value according to the actual speed.
++	UserSpeed = ecmd.speed;
++	UserDuplex = ecmd.duplex;
++	UserAutoNeg = ecmd.autoneg;	
++
++	if (LinkStatus & LINK_PARTNER_1000TFD)	
++                ecmd.advertising |= ADVERTISED_1000baseT_Full;
++	if (LinkStatus & LINK_PARTNER_1000THD)	
++                ecmd.advertising |= ADVERTISED_1000baseT_Half;
++	if (LinkStatus & LINK_PARTNER_100TXFD)	
++                ecmd.advertising |= ADVERTISED_100baseT_Full;
++	if (LinkStatus & LINK_PARTNER_100TXHD)	
++                ecmd.advertising |= ADVERTISED_100baseT_Half;
++	if (LinkStatus & LINK_PARTNER_10TFD)		
++                ecmd.advertising |= ADVERTISED_10baseT_Full;
++	if (LinkStatus & LINK_PARTNER_10THD)		
++                ecmd.advertising |= ADVERTISED_10baseT_Half;
++	if (LinkStatus & LINK_PARTNER_100T4)
++                ecmd.advertising |= ADVERTISED_100baseT_Full;	        
++    
++	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported, ecmd.supported);
++	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising, ecmd.advertising);
++	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.lp_advertising, ecmd.lp_advertising);
++	cmd->base.speed 		= ethtool_cmd_speed(&ecmd);
++	cmd->base.duplex 		= ecmd.duplex;
++	cmd->base.autoneg   	= ecmd.autoneg;
++	cmd->base.port   		= ecmd.port;
++
++	return 0;
++}
++

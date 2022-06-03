@@ -52,7 +52,7 @@ extern unsigned long UsedFlashSize;
 #define MAX_BANKS CONFIG_SPX_FEATURE_GLOBAL_FLASH_BANKS
 #endif
 
-static struct mtd_info *_ractrends_mtd[MAX_BANKS];
+extern struct mtd_info *ractrends_mtd[MAX_BANKS];
 
 #ifdef CONFIG_SPX_FEATURE_DISABLE_MTD_SUPPORT
 unsigned int g_MTDSupport = 0;
@@ -151,12 +151,12 @@ ScanFirmwareModule(unsigned long FlashStartOffset, unsigned long FlashSize,
 	
 }
 
-#ifdef CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK
+#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
 unsigned long get_secondaryimage_offset(void ){
 
-#ifdef CONFIG_SPX_FEATURE_CONTIGIOUS_SPI_MEMORY
+#if defined(CONFIG_SPX_FEATURE_CONTIGIOUS_SPI_MEMORY) || defined(CONFIG_SPX_FEATURE_SINGLE_SPI_ABR)
 	return CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE;
-#else
+#elif defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	int i;
 	unsigned long offset=0;
 	for(i=0;i<CONFIG_SPX_FEATURE_SECONDARY_IMAGE_SPI;i++){
@@ -166,14 +166,17 @@ unsigned long get_secondaryimage_offset(void ){
 		else
 #endif
 		{
+#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+                        offset=FlashSize;
+#else
 			offset = (CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_START - CONFIG_SPX_FEATURE_GLOBAL_FLASH_START + CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE);
+#endif
 		}
 	}
 	return offset;
 #endif
 }
 #endif
-
 
 /**
  * @fn GetCurrentRunningImage
@@ -234,7 +237,7 @@ int mtd_read_thunk(unsigned long Offset,unsigned long NumBytes,size_t* NumBytesR
      struct mtd_info *ractrendsmtd = NULL;
 
 	ractrendsmtd = get_mtd_device(NULL,0);
-	if(ractrendsmtd == NULL || IS_ERR(_ractrends_mtd))
+	if(ractrendsmtd == NULL || IS_ERR(ractrends_mtd))
 	{
 		g_MTDSupport = 0;
 		return -1;
@@ -265,8 +268,8 @@ flashbanksize_read(char *buf, char **start, off_t offset, int count, int *eof, v
 {
         static long flashbank_size = 0;
         static int firsttime = 1;
-        int bank;
-        char flahbankinfo[512];
+        int bank = 0,ret = 0;
+        char flahbankinfo[512] = {0};
 
         /* We don't support seeked reads. read should start from 0 */    
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(2,6,36))
@@ -305,14 +308,54 @@ flashbanksize_read(char *buf, char **start, off_t offset, int count, int *eof, v
 #endif
         for (bank = 0 ; bank < MAX_BANKS ; bank ++)
         {
-            if(_ractrends_mtd[bank]!=NULL)
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+		if(bank == 0 && broken_spi_banks == 1)
+		{
+			ret = snprintf(flahbankinfo+flashbank_size,sizeof(flahbankinfo) - flashbank_size,"bank%dsize=%lx\n",bank,(long unsigned int)0);
+                	if(ret < 0 || ret >= (signed)(sizeof(flahbankinfo) - flashbank_size))
+                	{	
+                        	printk(KERN_ALERT "Buffer Overflow\n");
+                        	return 0;
+                	}
+		}	
+		else if(bank == 1 && broken_spi_banks == 2)
+                {
+			ret = snprintf(flahbankinfo+flashbank_size,sizeof(flahbankinfo) - flashbank_size,"bank%dsize=%lx\n",bank,(long unsigned int)0);
+                	if(ret < 0 || ret >= (signed)(sizeof(flahbankinfo) - flashbank_size))
+                	{	
+                        	printk(KERN_ALERT "Buffer Overflow\n");
+                        	return 0;
+                	}
+                }
+		else
+		{
+	   		ret = snprintf(flahbankinfo+flashbank_size,sizeof(flahbankinfo) - flashbank_size,"bank%dsize=%lx\n",bank,(long unsigned int)FlashSize);
+                	if(ret < 0 || ret >= (signed)(sizeof(flahbankinfo) - flashbank_size))
+                	{
+                        	printk(KERN_ALERT "Buffer Overflow\n");
+                       		return 0;
+                	}	
+		}
+#else		
+            if(ractrends_mtd[bank]!=NULL)
             {
-                sprintf(flahbankinfo+flashbank_size,"bank%dsize=%lx\n",bank,(long unsigned int)_ractrends_mtd[bank]->size);
+                ret = snprintf(flahbankinfo+flashbank_size,sizeof(flahbankinfo) - flashbank_size,"bank%dsize=%lx\n",bank,(long unsigned int)ractrends_mtd[bank]->size);
+		if(ret < 0 || ret >= (signed)(sizeof(flahbankinfo) - flashbank_size))
+		{
+			printk(KERN_ALERT "Buffer Overflow\n");
+			return 0;
+		}
             }
             else
             {
-                sprintf(flahbankinfo+flashbank_size,"bank%dsize=0\n",bank);
+                ret = snprintf(flahbankinfo+flashbank_size,sizeof(flahbankinfo) - flashbank_size,"bank%dsize=0\n",bank);
+		if(ret < 0 || ret >= (signed)(sizeof(flahbankinfo) - flashbank_size))
+		{
+			printk(KERN_ALERT "Buffer Overflow\n");
+			return 0;
+		}
             }
+#endif
             flashbank_size = strlen(flahbankinfo);
         }
         /* Return length of data */
@@ -449,8 +492,11 @@ read_fw_info(char *buf, char **start, off_t offset, int count, int *eof, void *d
                 else
 #endif
                 {
-
+#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+		    flashstartoffset=FlashSize;
+#else
                     flashstartoffset = CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_START - CONFIG_SPX_FEATURE_GLOBAL_FLASH_START + CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE;
+#endif
                 }
             }
 #else
@@ -732,13 +778,18 @@ fwinfo2_read(char *buf, char **start, off_t offset, int count, int *eof, void *d
 	{
 		/* Scan and Get FwInfo */
 		unsigned long flashstartoffset;
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 		if (broken_spi_banks == 1)
 			flashstartoffset = CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_START - CONFIG_SPX_FEATURE_GLOBAL_FLASH_START;
 		else
 #endif
 		{
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+                    flashstartoffset=FlashSize;
+#else
+
 			flashstartoffset = CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_START - CONFIG_SPX_FEATURE_GLOBAL_FLASH_START + CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE;		
+#endif
 		}
 		
 		fwInfo_size = ScanFirmwareModule(flashstartoffset,
@@ -831,4 +882,3 @@ fwinfo_read(char *buf, char **start, off_t offset, int count, int *eof, void *da
 }
 #endif
 
-EXPORT_SYMBOL(_ractrends_mtd);

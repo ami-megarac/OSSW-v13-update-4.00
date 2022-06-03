@@ -195,6 +195,15 @@ IniSetDouble(INI_HANDLE handle, char *Section, char *Key, double Val)
 }
 
 void
+IniSetfloat(INI_HANDLE handle, char *Section, char *Key, float Val)
+{
+    char Str[MAX_STRSIZE];
+    sprintf(Str,"%f",Val);	
+    IniAddEntry(handle,Section,Key,Str);
+    return;
+}
+
+void
 IniSetBool(INI_HANDLE handle, char *Section, char *Key, int Bool)
 {
 	if (Bool)
@@ -243,6 +252,15 @@ IniGetUInt(INI_HANDLE handle, char *Section, char *Key, unsigned long  Def)
 
 double
 IniGetDouble(INI_HANDLE handle, char *Section, char *Key, double Def)
+{
+    char *s = IniGetEntry(handle,Section,Key);
+    if (s == NULL)
+        return Def;
+    return strtod(s,NULL);
+}
+
+float
+IniGetfloat(INI_HANDLE handle, char *Section, char *Key, float Def)
 {
     char *s = IniGetEntry(handle,Section,Key);
     if (s == NULL)

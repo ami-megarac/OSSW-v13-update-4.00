@@ -528,7 +528,7 @@ ipmi_lan_recv_packet(struct ipmi_intf * intf)
                rsp.data_len = pIPMIUDSMsg->IPMIMsgLen-sizeof(IPMIUDSMsg_T) - 2;
                rsp.ccode = CompletionCode;
 
-             if((pIPMIUDSMsg->Cmd == CMD_SEND_MSG) && (rsp.ccode == CC_NORMAL))
+             if((pIPMIUDSMsg->NetFnLUN >> 2 == NETFN_APP) && (pIPMIUDSMsg->Cmd == CMD_SEND_MSG) && (rsp.ccode == CC_NORMAL))
              {
                    ret = UDS_ReceiveData(&hSession.hUDSSession->hUDSInfo, buffer, (uint32*)&length, intf->session->timeout);
                    if(ret < 0)

@@ -1,0 +1,27 @@
+--- linux/drivers/usb/gadget/function/f_mass_storage.c	2022-05-05 15:37:23.876054646 +0800
++++ linux_new/drivers/usb/gadget/function/f_mass_storage.c	2022-05-05 16:45:51.676910403 +0800
+@@ -348,8 +348,7 @@
+ };
+ 
+ #define MAX_AMI_LUNS				(4)	// as max ami luns supported for cd and hd.
+-#define KERNEL_WAIT_TIMEOUT			(5*HZ)	// the time for kernel to wait remote response. default: 5 seconds in jiffies with wait_event_interruptible_timeout.
+-#define MAX_AMI_VENDOR_USB_LUNS		(1)	// "ONLY ONE instance" for IPMI USB between kernel fsg thread with its' device node...
++#define KERNEL_WAIT_TIMEOUT			(3*HZ)	// the time for kernel to wait host response for CD ejcetion, to avoid kernel crash with infinite wait. default: 3 seconds in jiffies with wait_event_timeout.
+ 
+ #endif // end #if (1 == ENABLE_MASS_STORAGE_NODE)
+ 
+@@ -3261,9 +3260,12 @@
+ 	pAMI_media_event_status_priv->MediaEventCode = MEDIA_EVENT_ID_MEDIA_REMOVAL;
+ 	
+ 	pAMI_media_event_status_priv->MediaStatus = 0x00;
+-	
+ 	pAMI_media_event_status_priv->additional_media_eject = MEDIA_EVENT_ID_EJECT_REQUEST;	// For CD eject event with Windows Host.
+-	wait_event(common->eject_wait, pAMI_media_event_status_priv->additional_media_eject == MEDIA_EVENT_ID_NO_EVENT);
++	if (!wait_event_timeout(common->eject_wait, pAMI_media_event_status_priv->additional_media_eject == MEDIA_EVENT_ID_NO_EVENT, KERNEL_WAIT_TIMEOUT))
++	{	// Mind the Timeout...
++		printk("CRIT!!!, %d timeout\n", instance);
++		return -1;
++	}
+ 
+ 	return 0; // all right.
+ }

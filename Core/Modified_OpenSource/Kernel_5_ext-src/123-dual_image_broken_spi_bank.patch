@@ -1,0 +1,39 @@
+--- linux.orig/drivers/mtd/concat/mtd-concat.c	2022-02-02 20:16:42.210117034 +0530
++++ linux/drivers/mtd/concat/mtd-concat.c	2022-02-02 20:19:10.747828714 +0530
+@@ -16,6 +16,10 @@
+ #include <linux/of_platform.h>
+ #include <linux/slab.h>
+ #include "../mtdcore.h"
++
++#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++extern unsigned char broken_spi_banks;// specify the number of broken SPI flash bank
++#endif
+ /*
+  * struct of_mtd_concat - platform device driver data.
+  * @cmtd the final mtd_concat device
+@@ -106,6 +110,25 @@
+                info->devices[info->num_devices++] = mtd;
+        }
+ 
++#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++       broken_spi_banks=0;
++       if(strstr(boot_command_line,"imagebooted=1")) {
++	       if(info->num_devices == 1) {
++		       broken_spi_banks=2;//second spi not detected
++		       printk("SPI 2 not Detected\n");
++	       }
++       }
++       else if(strstr(boot_command_line,"imagebooted=2")) {
++	       if(info->num_devices == 1) {
++		       broken_spi_banks=1;//first spi not detected
++		       printk("SPI 1 not Detected\n");
++	       }
++       }
++       else {
++	       broken_spi_banks=0;
++       }
++#endif
++
+        info->cmtd = mtd_concat_create(info->devices, info->num_devices,
+                                       dev_name(&pdev->dev));
+        if (!info->cmtd) {

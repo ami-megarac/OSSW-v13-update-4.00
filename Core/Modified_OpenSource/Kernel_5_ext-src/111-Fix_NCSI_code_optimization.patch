@@ -1,0 +1,86 @@
+diff -Naur linux_org/net/8021q/vlan_core.c linux/net/8021q/vlan_core.c
+--- linux_org/net/8021q/vlan_core.c	2021-11-26 14:41:56.573779652 +0800
++++ linux/net/8021q/vlan_core.c	2021-11-26 14:42:55.698953498 +0800
+@@ -359,6 +359,8 @@
+ 	int err;
+ 
+ 	err = vlan_kill_rx_filter_info(dev, proto, vid);
++	//Waiting NCSI command and status ready.
++	msleep(1000);
+ 	if (err)
+ 		pr_warn("failed to kill vid %04x/%d for device %s\n",
+ 			proto, vid, dev->name);
+diff -Naur linux_org/net/ncsi/ncsi-manage.c linux/net/ncsi/ncsi-manage.c
+--- linux_org/net/ncsi/ncsi-manage.c	2021-11-26 15:17:17.752398036 +0800
++++ linux/net/ncsi/ncsi-manage.c	2021-11-26 15:17:05.177000656 +0800
+@@ -1896,12 +1896,6 @@
+ int ncsi_start_dev(struct ncsi_dev *nd)
+ {
+ 	struct ncsi_dev_priv *ndp = TO_NCSI_DEV_PRIV(nd);
+-		
+-	if(InitComplete)	
+-	{
+-		ncsi_reset_dev(nd);
+-		return 0;	
+-	}
+ 	
+ 	if (nd->state != ncsi_dev_state_registered &&
+ 	    nd->state != ncsi_dev_state_functional)
+@@ -1926,9 +1920,6 @@
+ 	bool chained;
+ 	int old_state;
+ 	unsigned long flags;
+-
+-	if(InitComplete)
+-		return;
+ 	
+ 	/* Stop the channel monitor on any active channels. Don't reset the
+ 	 * channel state so we know which were active when ncsi_start_dev()
+diff -Naur linux_org/net/ncsi/ncsi-rsp.c linux/net/ncsi/ncsi-rsp.c
+--- linux_org/net/ncsi/ncsi-rsp.c	2021-11-26 14:41:02.676356044 +0800
++++ linux/net/ncsi/ncsi-rsp.c	2021-11-26 14:38:45.306923068 +0800
+@@ -1127,7 +1127,10 @@
+ 	struct ncsi_request *nr;
+ 	struct ncsi_pkt_hdr *hdr;
+ 	struct ncsi_rsp_pkt_hdr *h;
+-
++	struct ncsi_package *np;
++	struct ncsi_channel *nc;		
++	struct ncsi_cmd_arg nca;
++	
+ 	unsigned long flags;
+ 	int payload, i, ret;
+ 
+@@ -1205,6 +1208,18 @@
+ 			printk("Asynchronous Reset Detected !!!\n");			
+ 			printk("NCSI(%d.%d): Reset for NCSI Interface..\n",NCSI_PACKAGE_INDEX(h->common.channel), NCSI_CHANNEL_INDEX(h->common.channel));
+ 			InitComplete = 0;
++			//Add initla code aviod 
++			nca.ndp = ndp;
++			nca.req_flags = NCSI_REQ_FLAG_EVENT_DRIVEN;
++			nca.type = NCSI_PKT_CMD_CIS;				
++			
++			NCSI_FOR_EACH_PACKAGE(ndp, np) {		
++				NCSI_FOR_EACH_CHANNEL(np, nc) {			
++					nca.package = np->id;
++					nca.channel = nc->id;
++					ret = ncsi_xmit_cmd(&nca);
++				}
++			}
+ 			ncsi_reset_dev(&ndp->ndev);
+ 		}
+ #endif		
+diff -Naur linux_org/net/ncsi/proc.c linux/net/ncsi/proc.c
+--- linux_org/net/ncsi/proc.c	2021-11-26 14:38:55.410440038 +0800
++++ linux/net/ncsi/proc.c	2021-11-26 14:46:17.081328514 +0800
+@@ -46,8 +46,8 @@
+ char UserInterface[8] = "eth1";
+ #endif
+ int UserEnable = 0;
+-u16 UserVlanID=0;
+-u16 UserVlanID_old=0;
++int UserVlanID=0;
++int UserVlanID_old=0;
+ int UserFlowcontrol=0;
+ int UserSpeed=0;
+ int UserDuplex=1;

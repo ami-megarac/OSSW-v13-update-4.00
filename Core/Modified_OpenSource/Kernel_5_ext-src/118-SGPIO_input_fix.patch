@@ -1,0 +1,24 @@
+diff -Naur linux_old/drivers/gpio/sgpio-aspeed.c linux/drivers/gpio/sgpio-aspeed.c
+--- linux_old/drivers/gpio/sgpio-aspeed.c	2022-01-04 15:07:02.132889000 +0800
++++ linux/drivers/gpio/sgpio-aspeed.c	2022-01-04 15:12:20.156886290 +0800
+@@ -536,6 +536,7 @@
+ static int __init aspeed_sgpio_probe(struct platform_device *pdev)
+ {
+ 	struct aspeed_sgpio *gpio;
++	const struct aspeed_sgpio_pdata *pdata;
+ 	u32 nr_gpios, sgpio_freq, sgpio_clk_div,gpio_cnt_regval, pin_mask, max_ngpios, base;
+ 	int rc;
+ 	unsigned long apb_freq;
+@@ -548,6 +549,12 @@
+ 	if (IS_ERR(gpio->base))
+ 		return PTR_ERR(gpio->base);
+ 	
++	pdata = device_get_match_data(&pdev->dev);
++	if (!pdata)
++		return -EINVAL;
++		
++	pin_mask = pdata->pin_mask;
++
+ 	rc = of_property_read_u32(pdev->dev.of_node, "max-ngpios", &max_ngpios);
+ 	if (rc < 0) {
+ 		dev_err(&pdev->dev, "Could not read max-ngpios property\n");

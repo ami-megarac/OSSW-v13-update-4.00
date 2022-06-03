@@ -1,0 +1,151 @@
+--- linux_org/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-03-29 21:52:32.468337334 +0530
++++ linux_patches/drivers/i2c/muxes/i2c-mux-pca954x.c	2022-03-29 22:53:09.910888288 +0530
+@@ -84,10 +84,13 @@
+ struct pca954x {
+ 	const struct chip_desc *chip;
+ 
+-	u8 last_chan;		/* last register value */
++	u8 last_chan;           /* last register value */
+ 	/* MUX_IDLE_AS_IS, MUX_IDLE_DISCONNECT or >= 0 for channel */
+ 	s8 idle_state;
++	s8 deselect_timeout;
+ 
++	int doChanDeselect;
++	wait_queue_head_t chanDeselectWait;
+ 	struct i2c_client *client;
+ 
+ 	struct irq_domain *irq;
+@@ -96,6 +99,8 @@
+ 	bool ctrl_state;
+ };
+ 
++extern int i2c_slave_state[MAX_I2C_ADAPTERS];
++
+ /* Provide specs for the PCA954x types we know about */
+ static const struct chip_desc chips[] = {
+ 	[pca_9540] = {
+@@ -253,6 +258,7 @@
+ 		ret = pca954x_reg_write(muxc->parent, client, regval);
+ 		data->last_chan = ret < 0 ? 0 : regval;
+ 	}
++	data->doChanDeselect = 0;
+ 
+ 	return ret;
+ }
+@@ -264,6 +270,7 @@
+ 	s8 idle_state;
+ 	bool ctrl_state;
+ 	struct i2c_adapter *root;
++	s8 deselect_timeout;
+ 
+ 	idle_state = READ_ONCE(data->idle_state);
+ 	ctrl_state = READ_ONCE(data->ctrl_state);
+@@ -283,6 +290,23 @@
+ 					 data->last_chan);
+ 	}
+ 
++	deselect_timeout = READ_ONCE(data->deselect_timeout);
++
++        if(deselect_timeout > 0 && deselect_timeout <=127)
++        {
++                 int retry = 2;
++                 do {
++                        wait_event_timeout(data->chanDeselectWait, data->doChanDeselect, (msecs_to_jiffies(data->deselect_timeout)));
++                 } while ((i2c_slave_state[client->adapter->nr] != I2C_SLAVE_STOP) && (retry-- > 0));
++
++                 i2c_slave_state[client->adapter->nr] = 0;
++                 /* Deselect active channel */
++                 data->last_chan = 0;
++                 return pca954x_reg_write(muxc->parent, client,
++                                         data->last_chan);
++
++         }
++
+ 	/* otherwise leave as-is */
+ 
+ 	return 0;
+@@ -332,7 +356,51 @@
+ 	return ret < 0 ? ret : count;
+ }
+ 
++static ssize_t deselect_timeout_show(struct device *dev,
++                                     struct device_attribute *attr,
++                                     char *buf)
++{
++         struct i2c_client *client = to_i2c_client(dev);
++         struct i2c_mux_core *muxc = i2c_get_clientdata(client);
++         struct pca954x *data = i2c_mux_priv(muxc);
++
++         return sprintf(buf, "%d\n", READ_ONCE(data->deselect_timeout));
++
++}
++
++static ssize_t deselect_timeout_store(struct device *dev,
++                                 struct device_attribute *attr,
++                                 const char *buf, size_t count)
++{
++         struct i2c_client *client = to_i2c_client(dev);
++         struct i2c_mux_core *muxc = i2c_get_clientdata(client);
++         struct pca954x *data = i2c_mux_priv(muxc);
++         int val;
++         int ret;
++
++         ret = kstrtoint(buf, 0, &val);
++         if (ret < 0)
++                 return ret;
++
++         if (val < 0 || val > 127 )
++                 return -EINVAL;
++
++         i2c_lock_bus(muxc->parent, I2C_LOCK_SEGMENT);
++
++         WRITE_ONCE(data->deselect_timeout, val);
++
++         /*
++          * Set the mux into a state consistent with the new
++          * idle_state.
++          */
++
++         i2c_unlock_bus(muxc->parent, I2C_LOCK_SEGMENT);
++
++	 return ret < 0 ? ret : count;
++}
++
+ static DEVICE_ATTR_RW(idle_state);
++static DEVICE_ATTR_RW(deselect_timeout);
+ 
+ static irqreturn_t pca954x_irq_handler(int irq, void *dev_id)
+ {
+@@ -404,6 +472,7 @@
+ 	int c, irq;
+ 
+ 	device_remove_file(&client->dev, &dev_attr_idle_state);
++	device_remove_file(&client->dev, &dev_attr_deselect_timeout);
+ 
+ 	if (data->irq) {
+ 		for (c = 0; c < data->chip->nchans; c++) {
+@@ -487,6 +556,9 @@
+ 
+ 	data->last_chan = 0;		   /* force the first selection */
+ 	data->idle_state = MUX_IDLE_AS_IS;
++	data->deselect_timeout = -1;
++	data->doChanDeselect = 0;
++
+ 
+ 	idle_disconnect_dt = np &&
+ 		of_property_read_bool(np, "i2c-mux-idle-disconnect");
+@@ -514,12 +586,14 @@
+ 		if (ret)
+ 			goto fail_cleanup;
+ 	}
++	init_waitqueue_head(&(data->chanDeselectWait));
+ 
+ 	/*
+ 	 * The attr probably isn't going to be needed in most cases,
+ 	 * so don't fail completely on error.
+ 	 */
+ 	device_create_file(dev, &dev_attr_idle_state);
++	device_create_file(dev, &dev_attr_deselect_timeout);
+ 
+ 	dev_info(dev, "registered %d multiplexed busses for I2C %s %s\n",
+ 		 num, data->chip->muxtype == pca954x_ismux

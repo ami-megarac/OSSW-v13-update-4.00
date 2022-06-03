@@ -1,0 +1,99 @@
+diff -Naur linux_old/drivers/i2c/busses/i2c-new-aspeed.c linux/drivers/i2c/busses/i2c-new-aspeed.c
+--- linux_old/drivers/i2c/busses/i2c-new-aspeed.c	2021-10-27 14:51:07.997818000 +0800
++++ linux/drivers/i2c/busses/i2c-new-aspeed.c	2021-10-27 15:39:42.000000000 +0800
+@@ -204,14 +204,14 @@
+ #define AST_I2CS_ADDR1_ENABLE			BIT(7)
+ #define AST_I2CS_ADDR1(x)			(x)
+ 
+-#define I2C_SLAVE_MSG_BUF_SIZE		256
++#define I2C_SLAVE_MSG_BUF_SIZE		2000
+ 
+ #define AST_LOCKUP_DETECTED			BIT(15)
+ #define AST_I2C_LOW_TIMEOUT			0x07
+ 
+ #define ASPEED_I2C_DMA_SIZE		4096
+ 
+-#define SLAVE_TRIGGER_CMD       (AST_I2CS_ACTIVE_ALL | AST_I2CS_PKT_MODE_EN | AST_I2CS_AUTO_NAK_EN)
++#define SLAVE_TRIGGER_CMD       (AST_I2CS_ACTIVE_ALL | AST_I2CS_PKT_MODE_EN)
+ 
+ struct ast_i2c_timing_table {
+ 	u32 divisor;
+@@ -568,8 +568,8 @@
+ 		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+ 		break;
+ 	case AST_I2CS_SLAVE_MATCH:
+-	dev_dbg(i2c_bus->dev, "S : Sw\n");
+-	i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_REQUESTED, &value);
++		dev_dbg(i2c_bus->dev, "S : Sw\n");
++		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_REQUESTED, &value);
+ 		break;
+ 
+ 	case AST_I2CS_SLAVE_MATCH | AST_I2CS_STOP:
+@@ -779,7 +779,11 @@
+ 		break;
+ 	}
+ 
+-	writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);	
++	if (cmd)
++		writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);
++
++	dev_dbg(i2c_bus->dev, "cmd %x, s_irq[%x] sts[%x]\n", cmd, readl(i2c_bus->reg_base + AST_I2CS_ISR), readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
++
+ }
+ 
+ static void aspeed_i2c_slave_byte_irq(struct aspeed_new_i2c_bus *i2c_bus, u32 sts)
+@@ -829,6 +833,7 @@
+ 	}
+ 	writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+ 	writel(sts, i2c_bus->reg_base + AST_I2CS_ISR);
++	readl(i2c_bus->reg_base + AST_I2CS_ISR);
+ }
+ 
+ static int aspeed_new_i2c_slave_irq(struct aspeed_new_i2c_bus *i2c_bus)
+@@ -838,7 +843,7 @@
+ 
+ 	if (!(sts & ier))
+ 		return 0;
+-	dev_dbg(i2c_bus->dev, "slave irq sts %x\n", sts);
++	dev_dbg(i2c_bus->dev, "slave irq sts %x sts [%x]\n", sts, readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 
+ 	sts &= ~(AST_I2CS_ADDR_INDICATE_MASK | AST_I2CS_SLAVE_PENDING);
+ 
+@@ -1234,6 +1239,7 @@
+ static int aspeed_new_i2c_master_irq(struct aspeed_new_i2c_bus *i2c_bus)
+ {
+ 	u32 sts = readl(i2c_bus->reg_base + AST_I2CM_ISR);
++	u32 ctrl = 0;
+ 
+ 	dev_dbg(i2c_bus->dev, "M sts %x\n", sts);
+ 	if (!i2c_bus->alert_enable)
+@@ -1242,6 +1248,9 @@
+ 	if (AST_I2CM_BUS_RECOVER_FAIL & sts) {
+ 		dev_dbg(i2c_bus->dev, "M clear isr: AST_I2CM_BUS_RECOVER_FAIL= %x\n", sts);
+ 		writel(AST_I2CM_BUS_RECOVER_FAIL, i2c_bus->reg_base + AST_I2CM_ISR);
++		ctrl = readl(i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++		writel(0, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++		writel(ctrl, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
+ 		i2c_bus->cmd_err = -EPROTO;
+ 		complete(&i2c_bus->cmd_complete);
+ 		return 1;
+@@ -1333,6 +1342,7 @@
+ 	timeout = wait_for_completion_timeout(&i2c_bus->cmd_complete, i2c_bus->adap.timeout);
+ 	if (timeout == 0) {
+ 		int isr = readl(i2c_bus->reg_base + AST_I2CM_ISR);
++
+ 		dev_dbg(i2c_bus->dev, "timeout isr[%x]\n", isr);
+ 		if (isr) {
+ 			dev_dbg(i2c_bus->dev, "recovery situation isr %x\n", isr);
+diff -Naur linux_old/drivers/i2c/i2c-slave-read.c linux/drivers/i2c/i2c-slave-read.c
+--- linux_old/drivers/i2c/i2c-slave-read.c	2021-10-27 14:51:07.530052000 +0800
++++ linux/drivers/i2c/i2c-slave-read.c	2021-10-27 15:27:36.000000000 +0800
+@@ -6,7 +6,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/sysfs.h>
+ 
+-#define MQ_MSGBUF_SIZE		128
++#define MQ_MSGBUF_SIZE		2000
+ #define MQ_QUEUE_SIZE		32
+ #define MQ_QUEUE_NEXT(x)	(((x) + 1) & (MQ_QUEUE_SIZE - 1))
+ 

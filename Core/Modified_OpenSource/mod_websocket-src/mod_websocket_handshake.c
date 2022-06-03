@@ -4,7 +4,7 @@
 
 #include "mod_websocket.h"
 #include "mod_websocket_socket.h"
-
+#include "qdecoder.h"
 # include <string.h>
 
 #ifdef HAVE_PCRE_H
@@ -156,6 +156,17 @@ mod_websocket_errno_t mod_websocket_handshake_check_request(handler_ctx *hctx) {
     }
     hdrs = hctx->con->request.headers;
     handshake = &hctx->handshake;
+
+    data_string *ds_sess;
+    if (NULL == (ds_sess = (data_string *)array_get_element(hctx->con->request.headers, "Cookie"))) {
+        DEBUG_LOG(MOD_WEBSOCKET_LOG_ERR, "s", "Status: 401 Unauthorized \n");
+        return MOD_WEBSOCKET_UNAUTHORIZED;
+    }
+
+    if (is_valid_Qsession(ds_sess->value->ptr) == 0) {
+        DEBUG_LOG(MOD_WEBSOCKET_LOG_ERR, "s", "Status: 401 Unauthorized \n");
+        return MOD_WEBSOCKET_UNAUTHORIZED;
+    }
 
     /* store necessary headers */
     for (i = hdrs->used; i > 0; i--) {

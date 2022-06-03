@@ -1226,7 +1226,12 @@ getEncryptKey(unsigned char* EncryptKey)
 	else
 	{
 		memset(EncryptKey, 0, MAX_SIZE_KEY);
-		fscanf(fp, "%s", EncryptKey);	/* Fortify [Buffer overflow]:: False Positive */
+		if(fscanf(fp, "%s", EncryptKey) != 1)
+		{
+			printf("Failed to read the EncryptKey\n");
+			fclose(fp);
+			return -1;
+		}
 		fclose(fp);
 		return 0;
 	}

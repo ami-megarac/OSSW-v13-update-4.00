@@ -120,6 +120,7 @@ extern char * genuniqid(void);
 extern int is_valid_session(const char *filepath);
 extern int get_auth_str(char *uri, int uri_size, char *csrftoken);
 extern int is_valid_authorization(char *qsession, char *csrftoken);
+extern int is_valid_Qsession(char *qsession);
 
 /*
  * qentry.c - Linked-List Table

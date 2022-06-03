@@ -1235,8 +1235,8 @@ ipmi_lan_set_vlan_id(struct ipmi_intf *intf,  uint8_t chan, char *string)
 			return (-1);
 		}
 
-		if (id < 1 || id > 4094) {
-			lprintf(LOG_NOTICE, "VLAN ID must be between 1 and 4094.");
+		if (id < 2 || id > 4094) {
+			lprintf(LOG_NOTICE, "VLAN ID must be between 2 and 4094.");
 			return (-1);
 		}
 		else {

@@ -1,0 +1,139 @@
+--- linux/drivers/usb/gadget/configfs.c	2021-10-13 13:19:30.373902125 +0800
++++ linux.new/drivers/usb/gadget/configfs.c	2021-10-13 10:46:38.340582026 +0800
+@@ -17,7 +17,7 @@
+ #include <linux/errno.h>
+ #include <linux/usb/gadget.h>
+ 
+-#define USBG_MINORS		4
++#define USBG_MINORS		1
+ #define USBG_CLASS_NAME		"usbg"
+ 
+ static int major, minors;
+@@ -78,6 +78,7 @@
+ 	char b_vendor_code;
+ 	char qw_sign[OS_STRING_QW_SIGN_LEN];
+ 	int			minor;
++	bool			bind_cdev;
+ 	struct cdev		gcdev;	// For creating device node.
+ 	spinlock_t		glock;	/* lock this structure */	
+ 	spinlock_t spinlock;
+@@ -1681,12 +1682,13 @@
+ 		struct config_group *group,
+ 		const char *name)
+ {
+-	struct gadget_info 	*gi;
++	struct gadget_info 	*gi,*gi_check;
+ 	dev_t 			dev;
+ 	struct device		*device;
+ 	int 			status,ret;
+ 	struct config_item 	*item;
+-	int 			Null_device = 0;
++	int check_bind_dev_node = 0;
++
+ 
+ 	gi = kzalloc(sizeof(*gi), GFP_KERNEL);
+ 	if (!gi)
+@@ -1734,25 +1736,56 @@
+ 	if (!gi->composite.gadget_driver.function)
+ 		goto err;
+ 
++	//Check has any usb device has bind to usbg device node
+ 	item = config_group_find_item(group,"hid");
+-	if(item == NULL) {
+-		Null_device++;
++	if(item != NULL) {
++		gi_check = to_gadget_info(item);
++		if(gi_check->bind_cdev) {
++			check_bind_dev_node = 1;
++		}
+ 	}
++
+ 	item = config_group_find_item(group,"eth");
+-	if(item == NULL) {
+-		Null_device++;
++	if(item != NULL) {
++		gi_check = to_gadget_info(item);
++		if(gi_check->bind_cdev) {
++			check_bind_dev_node = 1;
++		}
+ 	}
+ 
+ 	item = config_group_find_item(group,"cdrom");
+-	if(item == NULL) {
+-		Null_device++;
++	if(item != NULL) {
++		gi_check = to_gadget_info(item);
++		if(gi_check->bind_cdev) {
++			check_bind_dev_node = 1;
++		}
+ 	}
+ 
+ 	item = config_group_find_item(group,"hddisk");
+-	if(item == NULL) {
+-		Null_device++;
++	if(item != NULL) {
++		gi_check = to_gadget_info(item);
++		if(gi_check->bind_cdev) {
++			check_bind_dev_node = 1;
++		}
++	}
++	
++	item = config_group_find_item(group,"port_b_eth");
++	if(item != NULL) {
++		gi_check = to_gadget_info(item);
++		if(gi_check->bind_cdev) {
++			check_bind_dev_node = 1;
++		}
++	}
++
++	item = config_group_find_item(group,"port_b_hddisk");
++	if(item != NULL) {
++		gi_check = to_gadget_info(item);
++		if(gi_check->bind_cdev) {
++			check_bind_dev_node = 1;
++		}
+ 	}
+-	if(Null_device == 4)  {
++
++	if(!check_bind_dev_node) {
+ 		cdev_init(&gi->gcdev, &usb_gadget_fops);
+ 		
+ 		mutex_lock(&usbg_ida_lock);
+@@ -1782,21 +1815,37 @@
+ 			ret = PTR_ERR(device);
+ 			goto del;
+ 		}
++		gi->bind_cdev = 1;
+ 	}
++	mutex_unlock(&usbg_ida_lock);
+ 	return &gi->group;
+ del:
++	mutex_unlock(&usbg_ida_lock);
+ 	cdev_del(&gi->gcdev);
+ err:
++	mutex_unlock(&usbg_ida_lock);
+ 	kfree(gi);
+ unlock:
+ 	mutex_unlock(&usbg_ida_lock);
+ 
+ fail:
++	mutex_unlock(&usbg_ida_lock);
+ 	return ERR_PTR(-ENOMEM);
+ }
+ 
+ static void gadgets_drop(struct config_group *group, struct config_item *item)
+ {
++	struct gadget_info *gi = to_gadget_info(item);
++
++	if(gi->bind_cdev) {
++		if (0 <= gi->minor)
++		{
++			device_destroy(usb_gadget_class, MKDEV(major, gi->minor));
++			cdev_del(&gi->gcdev);
++			usbg_put_minor(gi->minor);
++		}
++		gi->bind_cdev = 0;
++	}
+ 	config_item_put(item);
+ }
+ 

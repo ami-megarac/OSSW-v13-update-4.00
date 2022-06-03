@@ -1,0 +1,88 @@
+--- linux-5.4.85/kernel/panic.c	2021-04-15 16:09:02.977356112 +0800
++++ linux-5.4.85-new/kernel/panic.c	2021-04-23 10:55:53.760995225 +0800
+@@ -56,6 +56,22 @@
+ #define PANIC_PRINT_ALL_PRINTK_MSG	0x00000020
+ unsigned long panic_print;
+ 
++#ifdef CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
++#define WDT_ENABLE                      0x01
++#define WDT_TIMEOUT                     0xF4240     // 1 second
++#define WDT_TRIGGER                     0x00004755  // Trigger Passcode
++#define WDT_CLOCK                       0x10        // 1MHz Clock for WDT
++#define WDT_RESET_SYSTEM                0x02        // Enable System-Reset-On-Timeout
++#define WDT_CLR_EVT_COUNTER             0x76        // Clear the Timeout Counter & Boot Source code
++#define WDT2_SECOND_BOOT_CODE           0x80        // Enable Second Boot Code upon reset
++#define WDT_CUR_BOOTSRC_MASK            0x00000002
++#define AST_WDT2_VA_BASE                0xbe812040
++#define WDT2_CLR_TIMEOUT_STAT_REG       (AST_WDT2_VA_BASE + 0x14)
++#define WDT2_CONTROL_REG                (AST_WDT2_VA_BASE + 0x0C)
++#define WDT2_RELOAD_REG                 (AST_WDT2_VA_BASE + 0x04)
++#define WDT2_CNT_RESTART_REG            (AST_WDT2_VA_BASE + 0x08)
++#endif
++
+ ATOMIC_NOTIFIER_HEAD(panic_notifier_list);
+ 
+ EXPORT_SYMBOL(panic_notifier_list);
+@@ -135,6 +151,45 @@
+ }
+ EXPORT_SYMBOL(nmi_panic);
+ 
++#ifdef  CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
++static int TriggerWDT2(void)
++{
++       /*Check for WDT2 enable, if enabled it means that panic occurs before boot complete*/
++       if(!(*((volatile unsigned long *)(WDT2_CONTROL_REG)) & WDT_ENABLE ))
++       {
++           return -1;
++       }
++
++       /* Disable the Watchdog Timer */
++       *((volatile unsigned long *)(WDT2_CONTROL_REG)) &= ~(WDT_RESET_SYSTEM | WDT_ENABLE);
++
++       /* Set the Timeout value to reboot immediately */
++       *((volatile unsigned long *)(WDT2_RELOAD_REG)) = WDT_TIMEOUT;
++
++       /* Set the Trigger value to restart Timer freshly */
++       *((volatile unsigned long *)(WDT2_CNT_RESTART_REG)) = WDT_TRIGGER;
++
++       /* Set the Watchdog clock to 1MHz clock */
++       *((volatile unsigned long *)(WDT2_CONTROL_REG)) |= (WDT_CLOCK);
++
++       /* Reading the Watchdog Timeout event counter*/
++       {
++           *((volatile unsigned long *)(WDT2_CLR_TIMEOUT_STAT_REG)) = 0x00000001 ;
++       }
++
++#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
++       /* Enabling the Second Boot code upon reset */
++       *((volatile unsigned long *)(WDT2_CONTROL_REG)) |= (WDT2_SECOND_BOOT_CODE);
++#else
++       *((volatile unsigned long *)(WDT2_CONTROL_REG)) &= ~(WDT2_SECOND_BOOT_CODE);
++#endif
++       /* Enable back the Watchdog timer to start the Watchdog */
++       /* Also set the Flag to reset the CPU on Timeout */
++       *((volatile unsigned long *)(WDT2_CONTROL_REG)) |= (WDT_RESET_SYSTEM | WDT_ENABLE);
++       return 0;
++}
++#endif
++
+ static void panic_print_sys_info(void)
+ {
+ 	if (panic_print & PANIC_PRINT_ALL_PRINTK_MSG)
+@@ -320,9 +375,16 @@
+ 		 * shutting down.  But if there is a chance of
+ 		 * rebooting the system it will be rebooted.
+ 		 */
++#ifdef CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
++		if(TriggerWDT2() != 0)
++		{
++#endif
+ 		if (panic_reboot_mode != REBOOT_UNDEFINED)
+ 			reboot_mode = panic_reboot_mode;
+ 		emergency_restart();
++#ifdef CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
++		}
++#endif
+ 	}
+ #ifdef __sparc__
+ 	{

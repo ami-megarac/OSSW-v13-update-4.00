@@ -1,0 +1,245 @@
+--- linux/drivers/i2c/busses/i2c-new-aspeed.c	2021-12-14 15:57:09.462141000 +0800
++++ linux_n/drivers/i2c/busses/i2c-new-aspeed.c	2021-12-14 14:23:37.328334218 +0800
+@@ -20,6 +20,7 @@
+ #include <linux/regmap.h>
+ #include <linux/of_device.h>
+ #include <linux/dma-mapping.h>
++#include <linux/i2c-smbus.h>
+ #include "ast2600-i2c-global.h"
+ 
+ /***************************************************************************/
+@@ -411,10 +412,10 @@
+ 			divisor += inc;
+ 		}
+ 		baseclk_idx &= 0xf;
+-		scl_low = ((divisor >> 1) - 1) & 0xf;
+-		scl_high = (divisor - scl_low - 2) & 0xf;
++		scl_high = ((divisor >> 1) - 1) & 0xf;
++		scl_low = (divisor - scl_high - 2) & 0xf;
+ 		/* Divisor : Base Clock : tCKHighMin : tCK High : tCK Low  */
+-		data = ((scl_high) << 20) | (scl_high << 16) | (scl_low << 12) | (baseclk_idx);
++		data = ((scl_high - 1) << 20) | (scl_high << 16) | (scl_low << 12) | (baseclk_idx);
+ 	} else {
+ 		for (i = 0; i < ARRAY_SIZE(aspeed_old_i2c_timing_table); i++) {
+ 			if ((i2c_bus->apb_clk / aspeed_old_i2c_timing_table[i].divisor) <
+@@ -504,24 +505,37 @@
+ 	u8 value;
+ 	int i = 0;
+ 
++	//clear irq fisrt
++	writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);
++
+ 	sts &= ~(AST_I2CS_PKT_DONE | AST_I2CS_PKT_ERROR);
+ 
+ 	switch (sts) {
+-	case 0:
+-		cmd = SLAVE_TRIGGER_CMD;
+-		if (i2c_bus->mode == DMA_MODE)
+-			cmd |= AST_I2CS_RX_DMA_EN;
+-		else if (i2c_bus->mode == BUFF_MODE)
+-			cmd |= AST_I2CS_RX_BUFF_EN;
+-		else
+-			cmd &= ~AST_I2CS_PKT_MODE_EN;
+-		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+-		break;
+ 	case AST_I2CS_SLAVE_MATCH:
++	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_RX_DMA:
++	case AST_I2CS_SLAVE_MATCH | AST_I2CS_WAIT_RX_DMA:
+ 		dev_dbg(i2c_bus->dev, "S : Sw\n");
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_REQUESTED, &value);
+-		break;
+ 
++		if (readl(i2c_bus->reg_base + AST_I2CS_CMD_STS) & AST_I2CS_RX_DMA_EN)
++			dev_dbg(i2c_bus->dev, "S : Sw|D - Wait Rx : do nothing\n");
++		else {
++			dev_dbg(i2c_bus->dev, "S : Sw|D - issue rx dma\n");
++			cmd = SLAVE_TRIGGER_CMD;
++			if (i2c_bus->mode == DMA_MODE) {
++				cmd |= AST_I2CS_RX_DMA_EN;
++				writel(AST_I2CS_SET_RX_DMA_LEN(I2C_SLAVE_MSG_BUF_SIZE),
++				       i2c_bus->reg_base + AST_I2CS_DMA_LEN);
++			} else if (i2c_bus->mode == BUFF_MODE) {
++				cmd |= AST_I2CS_RX_BUFF_EN;
++				writel(AST_I2CC_SET_RX_BUF_LEN(i2c_bus->buf_size),
++				       i2c_bus->reg_base + AST_I2CC_BUFF_CTRL);
++			} else {
++				cmd &= ~AST_I2CS_PKT_MODE_EN;
++			}
++			writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
++		}
++		break;
+ 	case AST_I2CS_SLAVE_MATCH | AST_I2CS_STOP:
+ 		dev_dbg(i2c_bus->dev, "S : Sw|P\n");
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_STOP, &value);
+@@ -539,15 +553,13 @@
+ 		}
+ 		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+ 		break;
+-
+-	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_RX_DMA | AST_I2CS_STOP:
+-		//dev_dbg(i2c_bus->dev,
+-		//	"S : Sw|D|P wait rx dma workaround\n");
++	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE_NAK | AST_I2CS_RX_DONE | AST_I2CS_STOP:
++	case AST_I2CS_RX_DONE_NAK | AST_I2CS_RX_DONE | AST_I2CS_STOP:
+ 	case AST_I2CS_RX_DONE | AST_I2CS_WAIT_RX_DMA | AST_I2CS_STOP:
+ 		//dev_dbg(i2c_bus->dev,
+ 		//"S : D|P wait rx dma workaround\n");
+ 	case AST_I2CS_RX_DONE | AST_I2CS_STOP:
+-	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_RX_DMA:
++	case AST_I2CS_WAIT_RX_DMA | AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_STOP:
+ 	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_STOP:
+ 		cmd = SLAVE_TRIGGER_CMD;
+ 		if (sts & AST_I2CS_STOP) {
+@@ -729,19 +741,17 @@
+ 		break;
+ 	}
+ 
+-	if (cmd)
+-		writel(AST_I2CS_PKT_DONE, i2c_bus->reg_base + AST_I2CS_ISR);
+-
+-	dev_dbg(i2c_bus->dev, "cmd %x, s_irq[%x] sts[%x]\n", cmd, readl(i2c_bus->reg_base + AST_I2CS_ISR), readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
++	dev_dbg(i2c_bus->dev, "trigger %x, r cmd %x, s_irq[%x] sts[%x]\n",
++			cmd, readl(i2c_bus->reg_base + AST_I2CS_CMD_STS),
++			readl(i2c_bus->reg_base + AST_I2CS_ISR), readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 
+ }
+ 
+ static void aspeed_i2c_slave_byte_irq(struct aspeed_new_i2c_bus *i2c_bus, u32 sts)
+ {
+ 	u32 cmd = AST_I2CS_ACTIVE_ALL;
+-	u32 ier = 0 ;
+-	u8 byte_data = 0;
+-	u8 value = 0;
++	u8 byte_data;
++	u8 value;
+ 
+ 	switch (sts) {
+ 	case AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_RX_DMA:
+@@ -762,14 +772,9 @@
+ 		dev_dbg(i2c_bus->dev, "S : Sr|D\n");
+ 		byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 		dev_dbg(i2c_bus->dev, "addr : [%02x]", byte_data);
+-		ier = readl(i2c_bus->reg_base + AST_I2CS_IER);
+-		ier  &= ~(AST_I2CS_RX_DONE | AST_I2CS_SLAVE_MATCH); 
+-		sts &= ~ ( AST_I2CS_SLAVE_MATCH | AST_I2CS_RX_DONE | AST_I2CS_WAIT_TX_DMA );
+-		writel(ier, i2c_bus->reg_base + AST_I2CS_IER);
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_READ_REQUESTED, &byte_data);
+-		//dev_dbg(i2c_bus->dev, "tx: [%02x]\n", byte_data);
+-		//writel(byte_data, i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
+-		
++		dev_dbg(i2c_bus->dev, "tx: [%02x]\n", byte_data);
++		writel(byte_data, i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
+ 		break;
+ 	case AST_I2CS_TX_ACK | AST_I2CS_WAIT_TX_DMA:
+ 		cmd |= AST_I2CS_TX_CMD;
+@@ -779,21 +784,8 @@
+ 		writel(byte_data, i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
+ 		break;
+ 	case AST_I2CS_STOP:
+-	case AST_I2CS_RX_DONE | AST_I2CS_RX_DONE_NAK | AST_I2CS_STOP:
+ 	case AST_I2CS_STOP | AST_I2CS_TX_NAK:
+-		dev_dbg(i2c_bus->dev, "S : P \n");
+-		value = sts ;
+-		dev_dbg(i2c_bus->dev, "value=%x \n",value);
+-		if(sts & AST_I2CS_RX_DONE)
+-		{
+-			dev_dbg(i2c_bus->dev, "S : D \n");
+-			byte_data = AST_I2CC_GET_RX_BUFF(readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+-			i2c_slave_event(i2c_bus->slave, I2C_SLAVE_WRITE_RECEIVED, &byte_data);
+-			dev_dbg(i2c_bus->dev, "rx [%x]", byte_data);
+-		}
+-		if(sts & AST_I2CS_RX_DONE_NAK)
+-			dev_dbg(i2c_bus->dev, "rx: NACK\n");
+-
++		dev_dbg(i2c_bus->dev, "S : P\n");
+ 		i2c_slave_event(i2c_bus->slave, I2C_SLAVE_STOP, &value);
+ 		break;
+ 	default:
+@@ -1112,7 +1104,19 @@
+ 		}
+ 		break;
+ 	case AST_I2CM_RX_DONE:
+-		//dev_dbg(i2c_bus->dev, "M : AST_I2CM_RX_DONE = %x\n", sts);
++#ifdef CONFIG_I2C_SLAVE
++		/* Workaround for master/slave package mode enable rx done stuck issue
++		 * When master go for first read (RX_DONE), slave mode will also effect
++		 * Then controller will send nack, not operate anymore.
++		 */
++		if (readl(i2c_bus->reg_base + AST_I2CS_CMD_STS) & AST_I2CS_PKT_MODE_EN) {
++			u32 slave_cmd = readl(i2c_bus->reg_base + AST_I2CS_CMD_STS);
++
++			writel(0, i2c_bus->reg_base + AST_I2CS_CMD_STS);
++			writel(slave_cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
++		}
++		fallthrough;
++#endif
+ 	case AST_I2CM_RX_DONE | AST_I2CM_NORMAL_STOP:
+ 		dev_dbg(i2c_bus->dev, "M : AST_I2CM_RX_DONE | AST_I2CM_NORMAL_STOP = %x\n", sts);
+ 		/* do next rx */
+@@ -1305,18 +1309,41 @@
+ 	i2c_bus->msgs = msgs;
+ 	i2c_bus->msgs_index = 0;
+ 	i2c_bus->msgs_count = num;
+-	dev_dbg(i2c_bus->dev, "aspeed_new_i2c_do_msgs_xfer msg cnt %d\n", num);
++	dev_dbg(i2c_bus->dev, "aspeed_new_i2c_do_msgs_xfer msg cnt %d sts[%x]\n", num, readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 	reinit_completion(&i2c_bus->cmd_complete);
+ 	aspeed_new_i2c_do_start(i2c_bus);
+ 	timeout = wait_for_completion_timeout(&i2c_bus->cmd_complete, i2c_bus->adap.timeout);
+ 	if (timeout == 0) {
+ 		int isr = readl(i2c_bus->reg_base + AST_I2CM_ISR);
+ 
+-		dev_dbg(i2c_bus->dev, "timeout isr[%x]\n", isr);
+-		if (isr) {
+-			dev_dbg(i2c_bus->dev, "recovery situation isr %x\n", isr);
+-			aspeed_new_i2c_recover_bus(i2c_bus);
+-			return aspeed_new_i2c_is_irq_error(isr);
++		dev_dbg(i2c_bus->dev, "timeout isr[%x], sts[%x]\n", isr,
++					readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
++		if (isr || (readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF) & AST_I2CC_TX_DIR_MASK)) {
++			u32 ctrl = readl(i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++
++			writel(0, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++			writel(ctrl, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++#ifdef CONFIG_I2C_SLAVE
++			if (ctrl & AST_I2CC_SLAVE_EN) {
++				u32 cmd = SLAVE_TRIGGER_CMD;
++
++				if (i2c_bus->mode == DMA_MODE) {
++					cmd |= AST_I2CS_RX_DMA_EN;
++					writel(i2c_bus->slave_dma_addr, i2c_bus->reg_base + AST_I2CS_RX_DMA);
++					writel(i2c_bus->slave_dma_addr, i2c_bus->reg_base + AST_I2CS_TX_DMA);
++					writel(AST_I2CS_SET_RX_DMA_LEN(I2C_SLAVE_MSG_BUF_SIZE),
++						   i2c_bus->reg_base + AST_I2CS_DMA_LEN);
++				} else if (i2c_bus->mode == BUFF_MODE) {
++					cmd |= AST_I2CS_RX_BUFF_EN;
++					writel(AST_I2CC_SET_RX_BUF_LEN(i2c_bus->buf_size),
++						   i2c_bus->reg_base + AST_I2CC_BUFF_CTRL);
++				} else {
++					cmd &= ~AST_I2CS_PKT_MODE_EN;
++				}
++				dev_dbg(i2c_bus->dev, "slave trigger [%x]\n", cmd);
++				writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
++			}
++#endif
+ 		}
+ 		return -ETIMEDOUT;
+ 	}
+@@ -1341,6 +1368,8 @@
+ 
+ 	/* Enable Master Mode */
+ 	writel(fun_ctrl, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++	/* disable slave address */
++	writel(0, i2c_bus->reg_base + AST_I2CS_ADDR_CTRL);
+ 
+ 	/* Set AC Timing */
+ 	writel(aspeed_select_i2c_clock(i2c_bus), i2c_bus->reg_base + AST_I2CC_AC_TIMING);
+@@ -1377,8 +1406,7 @@
+ 	if (i2c_bus->slave)
+ 		return -EINVAL;
+ 
+-	dev_dbg(i2c_bus->dev, "slave addr %x\n",
+-		client->addr);
++	dev_dbg(i2c_bus->dev, "slave addr %x\n", client->addr);
+ 
+ 	writel(0, i2c_bus->reg_base + AST_I2CS_ADDR_CTRL);
+ 	writel(AST_I2CC_SLAVE_EN | readl(i2c_bus->reg_base + AST_I2CC_FUN_CTRL),

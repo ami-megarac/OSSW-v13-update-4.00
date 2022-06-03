@@ -1,0 +1,46 @@
+diff -Naur linux_org/net/ncsi/ncsi-manage.c linux/net/ncsi/ncsi-manage.c
+--- linux_org/net/ncsi/ncsi-manage.c	2021-10-21 17:40:13.353642298 +0800
++++ linux/net/ncsi/ncsi-manage.c	2021-10-21 17:39:50.454692757 +0800
+@@ -102,10 +102,6 @@
+ 	struct ncsi_channel *nc=NULL, *disable=NULL, *enable=NULL;	
+ 	int i;
+ 	
+-	if(verbose){
+-		printk("ndp->polling.status = %x, ndp->polling.id = %d\n", ndp->polling.status, ndp->polling.id);
+-	}
+-	
+ 	nc = ndp->polling.nc ;	
+ 	
+ 	if(!((ndp->polling.status >> ndp->polling.id)&0x1)){					
+@@ -120,9 +116,18 @@
+ 			}
+ 		}
+ 		
++		//No enable port, change to non-exist channel ID.
+ 		if(!enable)
+ 			ndp->polling.id = 32;
+-				
++
++		if(verbose){
++			printk("ndp->polling.status = %x, ndp->polling.id = %d\n", ndp->polling.status, ndp->polling.id);
++		}
++		
++		//No disable and enable port, it means no linkup port.
++		if(!disable && !enable)
++			return;	
++	
+ 		//Force linkdown to trigger bond net event
+ 		ncsi_report_link(ndp, true);
+ 		msleep(100);
+diff -Naur linux_org/net/ncsi/ncsi-rsp.c linux/net/ncsi/ncsi-rsp.c
+--- linux_org/net/ncsi/ncsi-rsp.c	2021-10-21 17:40:09.689810363 +0800
++++ linux/net/ncsi/ncsi-rsp.c	2021-10-21 17:39:55.146477515 +0800
+@@ -340,7 +340,7 @@
+ 	}
+ 	
+ 	//Check link status at received last channel status
+-	if((NCSI_CHANNEL_INDEX(rsp->rsp.common.channel) == (np->channel_num-1)) && (InitComplete == 1))	
++	if((NCSI_CHANNEL_INDEX(rsp->rsp.common.channel) == (np->channel_num-1)) && (InitComplete == 1) && !(ndp->flags & NCSI_DEV_RESET))	
+ 	{		
+ 			ndp->polling.nc = nc;
+ 			schedule_work(&ndp->polling_work);

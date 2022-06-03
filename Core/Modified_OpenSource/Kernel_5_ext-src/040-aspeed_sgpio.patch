@@ -1,0 +1,265 @@
+--- linux-5.4.85/drivers/gpio/Kconfig	2021-04-15 16:07:53.662748122 +0800
++++ linux-5.4.85-new/drivers/gpio/Kconfig	2021-04-23 10:16:36.874022960 +0800
+@@ -120,6 +120,13 @@
+ 	help
+ 	  Say Y here to support Aspeed AST2400 and AST2500 GPIO controllers.
+ 
++config SGPIO_ASPEED
++        tristate "Aspeed SGPIO support"
++        depends on (ARCH_ASPEED || COMPILE_TEST) && OF_GPIO
++        select GPIOLIB_IRQCHIP
++        help
++          Say Y here to support Aspeed AST2600 SGPIO controllers.
++
+ config GPIO_ATH79
+ 	tristate "Atheros AR71XX/AR724X/AR913X GPIO support"
+ 	default y if ATH79
+--- linux-5.4.85/drivers/gpio/Makefile	2021-04-15 16:07:53.666748040 +0800
++++ linux-5.4.85-new/drivers/gpio/Makefile	2021-04-23 10:18:15.371560182 +0800
+@@ -32,6 +32,7 @@
+ obj-$(CONFIG_GPIO_AMDPT)		+= gpio-amdpt.o
+ obj-$(CONFIG_GPIO_ARIZONA)		+= gpio-arizona.o
+ obj-$(CONFIG_GPIO_ASPEED)		+= gpio-aspeed.o
++obj-$(CONFIG_SGPIO_ASPEED)       	+= sgpio-aspeed.o
+ obj-$(CONFIG_GPIO_ATH79)		+= gpio-ath79.o
+ obj-$(CONFIG_GPIO_BCM_KONA)		+= gpio-bcm-kona.o
+ obj-$(CONFIG_GPIO_BD70528)		+= gpio-bd70528.o
+--- linux-5.4.85/drivers/gpio/sgpio-aspeed.c	2021-04-15 16:07:53.714747080 +0800
++++ linux-5.4.85-new/drivers/gpio/sgpio-aspeed.c	2021-04-27 11:50:34.097719305 +0800
+@@ -26,29 +26,31 @@
+  * We use SGPIO_OUTPUT_OFFSET to define the split between the inputs and
+  * outputs; the inputs start at line 0, the outputs start at OUTPUT_OFFSET.
+  */
+-#define MAX_NR_HW_SGPIO			80
++#define MAX_NR_HW_SGPIO 128
+ #define SGPIO_OUTPUT_OFFSET		MAX_NR_HW_SGPIO
+ 
+ #define ASPEED_SGPIO_CTRL		0x54
+ 
+-#define ASPEED_SGPIO_PINS_MASK		GENMASK(9, 6)
+-#define ASPEED_SGPIO_CLK_DIV_MASK	GENMASK(31, 16)
+-#define ASPEED_SGPIO_ENABLE		BIT(0)
++#define ASPEED_SGPIO_PINS_MASK	  GENMASK(10, 6)
++#define ASPEED_SGPIO_CLK_DIV_MASK GENMASK(31, 16)
++#define ASPEED_SGPIO_ENABLE	  BIT(0)
+ 
+ struct aspeed_sgpio {
+ 	struct gpio_chip chip;
+ 	struct clk *pclk;
+ 	spinlock_t lock;
+ 	void __iomem *base;
++	uint32_t dir_in[4];
+ 	int irq;
+ 	int n_sgpio;
+ };
+ 
+ struct aspeed_sgpio_bank {
+-	uint16_t    val_regs;
+-	uint16_t    rdata_reg;
+-	uint16_t    irq_regs;
+-	const char  names[4][3];
++	uint16_t val_regs;
++	uint16_t rdata_reg;
++	uint16_t irq_regs;
++	uint16_t tolerance_regs;
++	const char names[4][3];
+ };
+ 
+ /*
+@@ -63,19 +65,29 @@
+ 		.val_regs = 0x0000,
+ 		.rdata_reg = 0x0070,
+ 		.irq_regs = 0x0004,
++		.tolerance_regs = 0x0018,
+ 		.names = { "A", "B", "C", "D" },
+ 	},
+ 	{
+ 		.val_regs = 0x001C,
+ 		.rdata_reg = 0x0074,
+ 		.irq_regs = 0x0020,
++		.tolerance_regs = 0x0034,
+ 		.names = { "E", "F", "G", "H" },
+ 	},
+ 	{
+ 		.val_regs = 0x0038,
+ 		.rdata_reg = 0x0078,
+ 		.irq_regs = 0x003C,
+-		.names = { "I", "J" },
++		.tolerance_regs = 0x0050,
++		.names = { "I", "J", "K", "L" },
++	},
++	{
++		.val_regs = 0x0090,
++		.rdata_reg = 0x007C,
++		.irq_regs = 0x0094,
++		.tolerance_regs = 0x00A8,
++		.names = { "M", "N", "O", "P" },
+ 	},
+ };
+ 
+@@ -87,14 +99,16 @@
+ 	reg_irq_type1,
+ 	reg_irq_type2,
+ 	reg_irq_status,
++	reg_tolerance,
+ };
+ 
+-#define GPIO_VAL_VALUE      0x00
+-#define GPIO_IRQ_ENABLE     0x00
+-#define GPIO_IRQ_TYPE0      0x04
+-#define GPIO_IRQ_TYPE1      0x08
+-#define GPIO_IRQ_TYPE2      0x0C
+-#define GPIO_IRQ_STATUS     0x10
++#define GPIO_VAL_VALUE	    0x00
++#define GPIO_IRQ_ENABLE	    0x00
++#define GPIO_IRQ_TYPE0	    0x04
++#define GPIO_IRQ_TYPE1	    0x08
++#define GPIO_IRQ_TYPE2	    0x0C
++#define GPIO_IRQ_STATUS	    0x10
++#define GPIO_RESET_TOLERANT 0x18
+ 
+ static void __iomem *bank_reg(struct aspeed_sgpio *gpio,
+ 				     const struct aspeed_sgpio_bank *bank,
+@@ -115,6 +129,8 @@
+ 		return gpio->base + bank->irq_regs + GPIO_IRQ_TYPE2;
+ 	case reg_irq_status:
+ 		return gpio->base + bank->irq_regs + GPIO_IRQ_STATUS;
++	case reg_tolerance:
++		return gpio->base + bank->tolerance_regs + GPIO_RESET_TOLERANT;
+ 	default:
+ 		/* acturally if code runs to here, it's an error case */
+ 		BUG();
+@@ -406,18 +422,18 @@
+ 			girq = irq_find_mapping(gc->irq.domain, i * 32 + p);
+ 			generic_handle_irq(girq);
+ 		}
+-
++		iowrite32(reg, bank_reg(data, bank, reg_irq_status));
+ 	}
+ 
+ 	chained_irq_exit(ic, desc);
+ }
+ 
+ static struct irq_chip aspeed_sgpio_irqchip = {
+-	.name       = "aspeed-sgpio",
+-	.irq_ack    = aspeed_sgpio_irq_ack,
+-	.irq_mask   = aspeed_sgpio_irq_mask,
++	.name = "aspeed-sgpiom",
++	.irq_ack = aspeed_sgpio_irq_ack,
++	.irq_mask = aspeed_sgpio_irq_mask,
+ 	.irq_unmask = aspeed_sgpio_irq_unmask,
+-	.irq_set_type   = aspeed_sgpio_set_type,
++	.irq_set_type = aspeed_sgpio_set_type,
+ };
+ 
+ static int aspeed_sgpio_setup_irqs(struct aspeed_sgpio *gpio,
+@@ -435,7 +451,7 @@
+ 
+ 	/* Disable IRQ and clear Interrupt status registers for all SPGIO Pins. */
+ 	for (i = 0; i < ARRAY_SIZE(aspeed_sgpio_banks); i++) {
+-		bank =  &aspeed_sgpio_banks[i];
++		bank = &aspeed_sgpio_banks[i];
+ 		/* disable irq enable bits */
+ 		iowrite32(0x00000000, bank_reg(gpio, bank, reg_irq_enable));
+ 		/* clear status bits */
+@@ -461,14 +477,55 @@
+ 		iowrite32(0x00000000, bank_reg(gpio, bank, reg_irq_type1));
+ 		/* single edge trigger */
+ 		iowrite32(0x00000000, bank_reg(gpio, bank, reg_irq_type2));
++		/* enable irq */
++		//		iowrite32(0xffffffff, bank_reg(gpio, bank, reg_irq_enable));
+ 	}
+ 
+ 	return 0;
+ }
+ 
++static int aspeed_sgpio_reset_tolerance(struct gpio_chip *chip,
++					unsigned int offset, bool enable)
++{
++	struct aspeed_sgpio *gpio = gpiochip_get_data(chip);
++	unsigned long flags;
++	void __iomem *reg;
++	u32 val;
++
++	reg = bank_reg(gpio, to_bank(offset), reg_tolerance);
++
++	spin_lock_irqsave(&gpio->lock, flags);
++
++	val = readl(reg);
++
++	if (enable)
++		val |= GPIO_BIT(offset);
++	else
++		val &= ~GPIO_BIT(offset);
++
++	writel(val, reg);
++
++	spin_unlock_irqrestore(&gpio->lock, flags);
++
++	return 0;
++}
++
++static int aspeed_sgpio_set_config(struct gpio_chip *chip, unsigned int offset,
++				   unsigned long config)
++{
++	unsigned long param = pinconf_to_config_param(config);
++	u32 arg = pinconf_to_config_argument(config);
++
++	if (param == PIN_CONFIG_PERSIST_STATE)
++		return aspeed_sgpio_reset_tolerance(chip, offset, arg);
++	else
++		return -ENOTSUPP;
++}
++
+ static const struct of_device_id aspeed_sgpio_of_table[] = {
+-	{ .compatible = "aspeed,ast2400-sgpio" },
+-	{ .compatible = "aspeed,ast2500-sgpio" },
++	{ .compatible = "aspeed,ast2400-sgpiom" },
++	{ .compatible = "aspeed,ast2500-sgpiom" },
++	{ .compatible = "aspeed,ast2600-sgpiom" },
+ 	{}
+ };
+ 
+@@ -477,7 +534,7 @@
+ static int __init aspeed_sgpio_probe(struct platform_device *pdev)
+ {
+ 	struct aspeed_sgpio *gpio;
+-	u32 nr_gpios, sgpio_freq, sgpio_clk_div;
++	u32 nr_gpios, sgpio_freq, sgpio_clk_div, base;
+ 	int rc;
+ 	unsigned long apb_freq;
+ 
+@@ -500,12 +557,20 @@
+ 	}
+ 	gpio->n_sgpio = nr_gpios;
+ 
+-	rc = of_property_read_u32(pdev->dev.of_node, "bus-frequency", &sgpio_freq);
++	rc = of_property_read_u32(pdev->dev.of_node, "bus-frequency",
++				  &sgpio_freq);
+ 	if (rc < 0) {
+ 		dev_err(&pdev->dev, "Could not read bus-frequency property\n");
+ 		return -EINVAL;
+ 	}
+ 
++	rc = of_property_read_u32(pdev->dev.of_node, "base",
++                                  &base);
++        if (rc < 0) {
++                dev_err(&pdev->dev, "Could not base property\n");
++        //        return -EINVAL;
++        }
++
+ 	gpio->pclk = devm_clk_get(&pdev->dev, NULL);
+ 	if (IS_ERR(gpio->pclk)) {
+ 		dev_err(&pdev->dev, "devm_clk_get failed\n");
+@@ -548,9 +613,9 @@
+ 	gpio->chip.free = NULL;
+ 	gpio->chip.get = aspeed_sgpio_get;
+ 	gpio->chip.set = aspeed_sgpio_set;
+-	gpio->chip.set_config = NULL;
++	gpio->chip.set_config = aspeed_sgpio_set_config;
+ 	gpio->chip.label = dev_name(&pdev->dev);
+-	gpio->chip.base = -1;
++	gpio->chip.base = base;
+ 
+ 	aspeed_sgpio_setup_irqs(gpio, pdev);
+ 

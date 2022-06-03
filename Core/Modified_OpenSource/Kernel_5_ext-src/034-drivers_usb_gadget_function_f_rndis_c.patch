@@ -1,0 +1,54 @@
+--- linux/drivers/usb/gadget/function/f_rndis.c	2021-10-04 14:17:08.515321009 +0800
++++ linux.new/drivers/usb/gadget/function/f_rndis.c	2021-10-04 13:48:34.084183930 +0800
+@@ -69,7 +69,8 @@
+ struct f_rndis {
+ 	struct gether			port;
+ 	u8				ctrl_id, data_id;
+-	u8				ethaddr[14];
++	u8				ethaddr[ETH_ALEN];
++	char			host_mac[14];		//for string descriptor
+ 	u32				vendorID;
+ 	const char			*manufacturer;
+ 	struct rndis_params		*params;
+@@ -710,13 +711,17 @@
+ 			goto fail;
+ 		rndis_opts->bound = true;
+ 	}
+-	status = gether_get_host_addr_cdc(rndis_opts->net, rndis->ethaddr,
+-					  sizeof(rndis->ethaddr));
++
++	status = gether_get_host_addr_cdc(rndis_opts->net, rndis->host_mac,
++					  sizeof(rndis->host_mac));
+ 	if (status < 12) {
+ 		kfree(rndis);
+ 		return ERR_PTR(-EINVAL);
+ 	}
+-	rndis_string_defs[0].s = rndis->ethaddr;
++
++	rndis_string_defs[0].s = rndis->host_mac;
++
++	gether_get_host_addr_u8(rndis_opts->net, rndis->ethaddr);
+ 	us = usb_gstrings_attach(cdev, rndis_strings,
+ 				 ARRAY_SIZE(rndis_string_defs));
+ 	if (IS_ERR(us)) {
+@@ -843,10 +848,8 @@
+ 	struct f_rndis_opts *opts;
+ 
+ 	opts = container_of(f, struct f_rndis_opts, func_inst);
+-	if (opts->bound)
+-		gether_cleanup(netdev_priv(opts->net));
+-	else
+-		free_netdev(opts->net);
++
++	free_netdev(opts->net);
+ 	opts->borrowed_net = opts->bound = true;
+ 	opts->net = net;
+ }
+@@ -996,7 +999,6 @@
+ 	mutex_lock(&opts->lock);
+ 	opts->refcnt++;
+ 
+-	gether_get_host_addr_u8(opts->net, rndis->ethaddr);
+ 	rndis->vendorID = opts->vendor_id;
+ 	rndis->manufacturer = opts->manufacturer;
+ 

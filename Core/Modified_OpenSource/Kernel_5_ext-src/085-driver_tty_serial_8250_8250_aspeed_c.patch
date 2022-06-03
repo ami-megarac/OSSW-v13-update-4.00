@@ -1,0 +1,12 @@
+diff -Naur linux_old/drivers/tty/serial/8250/8250_aspeed.c linux/drivers/tty/serial/8250/8250_aspeed.c
+--- linux_old/drivers/tty/serial/8250/8250_aspeed.c	2021-08-16 13:47:05.488098986 +0800
++++ linux/drivers/tty/serial/8250/8250_aspeed.c	2021-08-16 13:53:19.260107855 +0800
+@@ -266,7 +266,7 @@
+ 		}
+ 
+ 		rc = aspeed_udma_request_rx_chan(dma->ch, dma->rx_addr,
+-				dma->rx_rb, dma->rx_rbsz, ast8250_dma_rx_complete, port, dma->tx_tmout_dis);
++				dma->rx_rb, dma->rx_rbsz, ast8250_dma_rx_complete, port, dma->rx_tmout_dis);
+ 		if (rc) {
+ 			dev_err(port->dev, "failed to request DMA RX channel\n");
+ 			goto free_dma_n_out;

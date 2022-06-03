@@ -100,16 +100,18 @@ void NAME##_func(regmatch_t MATCHES[]) { \
         char *getenvptr=getenv("HTTP_X_CSRFTOKEN");\
         pre_call_hook(req); \
         qentry_t *sess = qcgisess_init(req, NULL); \
-        if(sess->getint(sess, "authorized")!=1 || getenvptr == NULL || (strncmp(sess->getstr(sess, "CSRFTOKEN", false), getenvptr, strlen(sess->getstr(sess, "CSRFTOKEN", false))) != 0 ) ||/* check password change status for first login */ (sess->getint(sess, "passwordStatus")!=0) ) { /*false positive [Memory Leak]*/\
+       if(sess->getint(sess, "authorized")!=1 || getenvptr == NULL || (strncmp(sess->getstr(sess, "CSRFTOKEN", false), getenvptr, strlen(sess->getstr(sess, "CSRFTOKEN", false))) != 0 ) ||/* check password change status for first login */ (sess->getint(sess, "passwordStatus")!=0) || (sess->getint(sess, "TFAEnabled")==1 && sess->getint(sess, "TFAStatus")==0)) { /*false positive [Memory Leak]*/\
                 json_object *jresp; \
                 printf("Status: 401 Unauthorized \n"); \
                 qcgires_setcontenttype(req, "application/json"); \
                 jresp = json_object_new_object(); \
                 json_object_object_add(jresp, "cc", json_object_new_int(7)); \
                 if(sess->getint(sess, "passwordStatus")==1) { \
-					json_object_object_add(jresp, "error", json_object_new_string("Password should be changed for default user and should have a minimum of 8 characters.")); \
+                    json_object_object_add(jresp, "error", json_object_new_string("Password should be changed for default user and should have a minimum of 8 characters.")); \
+                }else if(sess->getint(sess, "TFAEnabled")==1 && sess->getint(sess, "TFAStatus")==0) { \
+                    json_object_object_add(jresp, "error", json_object_new_string("2FA should be verified")); \
                 }else { \
-                	json_object_object_add(jresp, "error", json_object_new_string("Invalid Authentication")); \
+                    json_object_object_add(jresp, "error", json_object_new_string("Invalid Authentication")); \
                 } \
                 printf("%s", json_object_to_json_string(jresp)); \
                 json_object_put(jresp); \
@@ -174,17 +176,19 @@ void NAME##_func(regmatch_t MATCHES[]) { \
         pre_call_hook(req); \
         qcgisess_validate(req);\
         qentry_t *sess = qcgisess_init(req, NULL); \
-        if(sess->getint(sess, "authorized")!=1 || getenvptr == NULL || (strncmp(sess->getstr(sess, "CSRFTOKEN", false), getenvptr, strlen(sess->getstr(sess, "CSRFTOKEN", false))) != 0 ) ||/* check password change status for first login */ (sess->getint(sess, "passwordStatus")!=0) ) { \
+        if(sess->getint(sess, "authorized")!=1 || getenvptr == NULL || (strncmp(sess->getstr(sess, "CSRFTOKEN", false), getenvptr, strlen(sess->getstr(sess, "CSRFTOKEN", false))) != 0 ) ||/* check password change status for first login */ (sess->getint(sess, "passwordStatus")!=0) || (sess->getint(sess, "TFAEnabled")==1 && sess->getint(sess, "TFAStatus")==0)) { \
                 json_object *jresp; \
                 printf("Status: 401 Unauthorized \n"); \
                 qcgires_setcontenttype(req, "application/json"); \
                 jresp = json_object_new_object(); \
                 json_object_object_add(jresp, "cc", json_object_new_int(7)); \
                 if(sess->getint(sess, "passwordStatus")==1) { \
-					json_object_object_add(jresp, "error", json_object_new_string("Password should be changed for default user and should have a minimum of 8 characters.")); \
-				}else { \
-					json_object_object_add(jresp, "error", json_object_new_string("Invalid Authentication")); \
-				} \
+                    json_object_object_add(jresp, "error", json_object_new_string("Password should be changed for default user and should have a minimum of 8 characters.")); \
+                }else if(sess->getint(sess, "TFAEnabled")==1 && sess->getint(sess, "TFAStatus")==0) { \
+                    json_object_object_add(jresp, "error", json_object_new_string("2FA should be verified")); \
+                }else { \
+                    json_object_object_add(jresp, "error", json_object_new_string("Invalid Authentication")); \
+                } \
                 printf("%s", json_object_to_json_string(jresp)); \
                 json_object_put(jresp); \
                 qcgisess_clear(sess); \
@@ -238,9 +242,19 @@ void NAME##_func(regmatch_t MATCHES[]) { \
         json_object_put(jresp_lenerr); \
         goto end_handler; \
     } \
-	if(req==NULL) qcgires_error(req, "Can't set options."); \
+	if(req == NULL) { \
+		json_object *jresp; \
+		printf("Status: 400 Bad Request \r\n"); \
+		qcgires_setcontenttype(req, "application/json"); \
+		jresp = json_object_new_object(); \
+		json_object_object_add(jresp, "code", json_object_new_int(7)); \
+		json_object_object_add(jresp, "error", json_object_new_string("Invalid Request.")); \
+		printf("%s", json_object_to_json_string(jresp)); \
+		json_object_put(jresp); \
+		goto end_handler; \
+	} \
 	req = qcgireq_parse(req, 0); \
-	if(req==NULL) { \
+	if(req == NULL) { \
 		json_object *jresp; \
 		printf("Status: 400 Bad Request \r\n"); \
 		qcgires_setcontenttype(req, "application/json"); \
@@ -254,17 +268,19 @@ void NAME##_func(regmatch_t MATCHES[]) { \
 	pre_call_hook(req); \
 	qentry_t *sess = qcgisess_init(req, NULL); \
 	enviptr=getenv("HTTP_X_CSRFTOKEN");\
-	if(sess->getint(sess, "authorized")!=1 ||  enviptr == NULL || (strncmp(sess->getstr(sess, "CSRFTOKEN", false), enviptr, strlen(sess->getstr(sess, "CSRFTOKEN", false))) != 0 ) ||/* check password change status for first login */ (sess->getint(sess, "passwordStatus")!=0) ){ \
+	if(sess->getint(sess, "authorized")!=1 ||  enviptr == NULL || (strncmp(sess->getstr(sess, "CSRFTOKEN", false), enviptr, strlen(sess->getstr(sess, "CSRFTOKEN", false))) != 0 ) ||/* check password change status for first login */ (sess->getint(sess, "passwordStatus")!=0) || (sess->getint(sess, "TFAEnabled")==1 && sess->getint(sess, "TFAStatus")==0)){ \
 			json_object *jresp; \
 			printf("Status: 401 Unauthorized \n"); \
 			qcgires_setcontenttype(req, "application/json"); \
 			jresp = json_object_new_object(); \
 			json_object_object_add(jresp, "cc", json_object_new_int(7)); \
 			if(sess->getint(sess, "passwordStatus")==1) { \
-				json_object_object_add(jresp, "error", json_object_new_string("Password should be changed for default user and should have a minimum of 8 characters.")); \
-			}else { \
-				json_object_object_add(jresp, "error", json_object_new_string("Invalid Authentication")); \
-			} \
+                json_object_object_add(jresp, "error", json_object_new_string("Password should be changed for default user and should have a minimum of 8 characters.")); \
+            }else if(sess->getint(sess, "TFAEnabled")==1 && sess->getint(sess, "TFAStatus")==0) { \
+                json_object_object_add(jresp, "error", json_object_new_string("2FA should be verified")); \
+            }else { \
+                json_object_object_add(jresp, "error", json_object_new_string("Invalid Authentication")); \
+            } \
 			printf("%s", json_object_to_json_string(jresp)); \
             json_object_put(jresp); \
             qcgisess_clear(sess); \
@@ -317,9 +333,19 @@ void NAME##_func(regmatch_t MATCHES[]) { \
         json_object_put(jresp_lenerr); \
         goto end_handler; \
     } \
-    if(req==NULL) qcgires_error(req, "Can't set options."); \
+    if(req == NULL) { \
+		json_object *jresp; \
+		printf("Status: 400 Bad Request \r\n"); \
+		qcgires_setcontenttype(req, "application/json"); \
+		jresp = json_object_new_object(); \
+		json_object_object_add(jresp, "code", json_object_new_int(7)); \
+		json_object_object_add(jresp, "error", json_object_new_string("Invalid Request.")); \
+		printf("%s", json_object_to_json_string(jresp)); \
+		json_object_put(jresp); \
+		goto end_handler; \
+	} \
     req = qcgireq_parse(req, 0); \
-    if(req==NULL) { \
+    if(req == NULL) { \
 		json_object *jresp; \
 		printf("Status: 400 Bad Request \r\n"); \
 		qcgires_setcontenttype(req, "application/json"); \

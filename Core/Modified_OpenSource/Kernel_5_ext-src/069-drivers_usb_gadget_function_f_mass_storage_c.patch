@@ -1,0 +1,116 @@
+--- linux/drivers/usb/gadget/configfs.c	2021-09-27 14:40:17.275048057 +0800
++++ linux-new/drivers/usb/gadget/configfs.c	2021-09-28 15:46:39.611516179 +0800
+@@ -605,9 +605,12 @@
+ 
+ 	gi = container_of(group, struct gadget_info, functions_group);
+ 
++	strcpy(fi->group.cg_item.AMI_namebuf, gi->group.cg_item.ci_name);
++
+ 	mutex_lock(&gi->lock);
+ 	list_add_tail(&fi->cfs_list, &gi->available_func);
+ 	mutex_unlock(&gi->lock);
++
+ 	return &fi->group;
+ }
+ 
+--- linux/include/linux/configfs.h	2021-06-03 14:59:17.000000000 +0800
++++ linux-new/include/linux/configfs.h	2021-09-28 15:48:48.348297775 +0800
+@@ -40,6 +40,7 @@
+ struct config_item {
+ 	char			*ci_name;
+ 	char			ci_namebuf[CONFIGFS_ITEM_NAME_LEN];
++	char			AMI_namebuf[CONFIGFS_ITEM_NAME_LEN];
+ 	struct kref		ci_kref;
+ 	struct list_head	ci_entry;
+ 	struct config_item	*ci_parent;
+--- linux/drivers/usb/gadget/function/f_mass_storage.c	2021-09-27 14:40:17.299048015 +0800
++++ linux-new/drivers/usb/gadget/function/f_mass_storage.c	2021-09-28 15:58:39.266677037 +0800
+@@ -342,8 +342,9 @@
+ 	// Base on the attribute of lun: cdrom. 0: HD, 1: CD. 
+ 	GADGET_MASS_STORAGE_NODE_TYPE_ID_HD = 0,	// HDD
+ 	GADGET_MASS_STORAGE_NODE_TYPE_ID_CD = 1,	// CD-ROM
+-	GADGET_MASS_STORAGE_NODE_TYPE_ID_MAX = 2,
+-	GADGET_MASS_STORAGE_NODE_TYPE_ID_INVALID = 2,
++	GADGET_MASS_STORAGE_NODE_TYPE_ID_PORT_B_HD = 2,
++	GADGET_MASS_STORAGE_NODE_TYPE_ID_MAX = 3,
++	GADGET_MASS_STORAGE_NODE_TYPE_ID_INVALID = 3,
+ };
+ 
+ #define MAX_AMI_LUNS				(4)	// as max ami luns supported for cd and hd.
+@@ -380,7 +381,7 @@
+ #if (1 == ENABLE_MASS_STORAGE_NODE)
+ #define MSG_CLASS_NAME				"msg"	// a class under /sys/class/, for short of "Mass Storage Gadget"...
+ #define MSG_NODE_NAME_PREFIX		"usb"	// device node name.
+-#define MSG_MINORS					(2)	// minors indicates the maxium number of device node that allow to create under /dev/.
++#define MSG_MINORS					(3)	// minors indicates the maxium number of device node that allow to create under /dev/.
+ 										// One node is for CD, and the other one is for HD
+ static int major, minors;
+ static struct class *msg_class;	// a class for mass storage gadget.
+@@ -3162,6 +3163,7 @@
+ 			break;
+ 		}
+ 		case GADGET_MASS_STORAGE_NODE_TYPE_ID_HD:
++		case GADGET_MASS_STORAGE_NODE_TYPE_ID_PORT_B_HD:
+ 		{
+ 			for (i = 0; i < max_luns; i += 1)
+ 			{
+@@ -3347,7 +3349,8 @@
+ 		return -EINVAL;
+ 	}
+ 	
+-	if ( GADGET_MASS_STORAGE_NODE_TYPE_ID_HD != node_type_id)
++	if ( (GADGET_MASS_STORAGE_NODE_TYPE_ID_HD != node_type_id) && 
++			(GADGET_MASS_STORAGE_NODE_TYPE_ID_PORT_B_HD != node_type_id))
+ 	{	// check boundary.
+ 		printk("invalid node type %d \n", node_type_id);
+ 		return -1;
+@@ -3399,7 +3402,8 @@
+ 	
+ 	node_type_id = fsg->node_type;
+ 	
+-	if ( GADGET_MASS_STORAGE_NODE_TYPE_ID_HD != node_type_id)
++	if ( (GADGET_MASS_STORAGE_NODE_TYPE_ID_HD != node_type_id) &&
++			(GADGET_MASS_STORAGE_NODE_TYPE_ID_PORT_B_HD != node_type_id) )
+ 	{	// check boundary.
+ 		printk("invalid node type %d \n", node_type_id);
+ 		return -1;
+@@ -3778,6 +3782,7 @@
+ 				ami_event_notification_kernel_cd_load(fsg_opts->common->fsg, opts->lun_id);
+ 				break;
+ 			case GADGET_MASS_STORAGE_NODE_TYPE_ID_HD:
++			case GADGET_MASS_STORAGE_NODE_TYPE_ID_PORT_B_HD:
+ 				ami_event_notification_kernel_hd_load(fsg_opts->common->fsg, opts->lun_id);
+ 				break;
+ 			default:
+@@ -4237,9 +4242,28 @@
+ 		printk("DBG!fsg_alloc cdrom %d\n", common->luns[common->lun]->cdrom);
+ 	#endif
+ 		fsg->node_type = common->luns[common->lun]->cdrom;
+-		
+-		device = device_create(msg_class, NULL, dev, NULL,
+-					   "%s%s", MSG_NODE_NAME_PREFIX, (!fsg->node_type)?"hd":"cd"); // Deivce node named as usbhd/usbcd.
++
++		if( strcmp(fi->group.cg_item.AMI_namebuf, "cdrom") == 0)
++		{
++			device = device_create(msg_class, NULL, dev, NULL,
++					   "%s%s", MSG_NODE_NAME_PREFIX, "cd"); // Deivce node named as usbcd.
++		}
++		else if( strcmp(fi->group.cg_item.AMI_namebuf, "hddisk") == 0)
++		{
++			device = device_create(msg_class, NULL, dev, NULL,
++					   "%s%s", MSG_NODE_NAME_PREFIX, "hd"); // Deivce node named as usbhd.
++		}
++		else if( strcmp(fi->group.cg_item.AMI_namebuf, "port_b_hddisk") == 0)
++		{
++			
++			device = device_create(msg_class, NULL, dev, NULL,
++					   "%s%s", MSG_NODE_NAME_PREFIX, "port_b_hddisk"); // Deivce node named as usbport_b_hddisk.
++		}
++		else
++		{
++			printk("Unsupport Virtual Device\n");
++		}
++
+ 		if (IS_ERR(device)) {
+ 			ret = PTR_ERR(device);
+ 			goto del;

@@ -28,7 +28,6 @@
 #include <asm/uaccess.h>	/* copyin and copyout   */
 #include <asm/io.h>
 #include <linux/delay.h>
-#include <linux/bigphysarea.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/cdev.h>

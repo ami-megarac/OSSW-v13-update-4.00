@@ -41,6 +41,8 @@ int reset_write_test_setting ( struct file *filp, const char __user *buff, unsig
                 return -EFAULT;
 	
         buf_val[len] = '\0'; 
+        /*Reason for False Positive - Convert value from userspace */
+    	/*coverity [Untrusted value as argument : FALSE]*/
         m_reset_test_enable = (unsigned int) simple_strtol(buf_val, NULL, 10);
 
 	if (m_reset_test_enable == ENABLE_RESET_DRIVER_TESTING)

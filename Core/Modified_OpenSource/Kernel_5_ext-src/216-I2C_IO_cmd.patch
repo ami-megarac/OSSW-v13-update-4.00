@@ -1,0 +1,285 @@
+diff -ruNa linux/drivers/i2c/busses/i2c-new-aspeed.c linux_n/drivers/i2c/busses/i2c-new-aspeed.c
+--- linux/drivers/i2c/busses/i2c-new-aspeed.c	2022-03-21 18:59:40.989144000 +0800
++++ linux_n/drivers/i2c/busses/i2c-new-aspeed.c	2022-03-25 13:11:16.814893120 +0800
+@@ -217,7 +217,7 @@
+ 	u32 divisor;
+ 	u32 timing;
+ };
+-
++static int TmpI2CLinkStatus = I2C_LINK_NO_FAILURE;
+ static struct ast_i2c_timing_table aspeed_old_i2c_timing_table[] = {
+ 	/* Divisor : Base Clock : tCKHighMin : tCK High : tCK Low  */
+ 	/* Divisor :	  [3:0] : [23: 20]   :   [19:16]:   [15:12] */
+@@ -434,7 +434,7 @@
+ 	u32 ctrl;
+ 	u32 state;
+ 	int r;
+-
++	TmpI2CLinkStatus = I2C_UNDER_RCV;
+ 	dev_dbg(i2c_bus->dev, "%d-bus recovery bus [%x]\n", i2c_bus->adap.nr,
+ 		readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 
+@@ -493,9 +493,54 @@
+ 		writel(cmd, i2c_bus->reg_base + AST_I2CS_CMD_STS);
+ 	}
+ #endif
++	state = readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF);
++	if(!(state & AST_I2CC_SDA_LINE_STS) )
++		TmpI2CLinkStatus = I2C_UNABLE_DRIVE_DATA_HIGH;
++	else if(!(state & AST_I2CC_SCL_LINE_STS))
++		TmpI2CLinkStatus = I2C_UNABLE_DRIVE_CLK_HIGH;
++	else
++		TmpI2CLinkStatus = I2C_LINK_NO_FAILURE;
+ 	return ret;
+ }
+-
++int test_i2c_bus(struct i2c_adapter *adap, int rcv)
++{
++	struct aspeed_new_i2c_bus *i2c_bus = i2c_get_adapdata(adap);
++	int ret;
++	if(readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF) & AST_I2CC_BUS_BUSY_STS)
++	{
++		/* If bus is busy in a single master environment, attempt recovery. */
++		if (i2c_bus->multi_master)
++		{
++			return I2C_TEST_BUSY_M;
++		}
++		else
++		{			
++			if(rcv)
++			{
++				ret = aspeed_new_i2c_recover_bus(i2c_bus);
++				if (ret)
++					return I2C_TEST_RECOVERY_FAILED;
++				else
++					return I2C_TEST_RECVOERY_OK;
++			}
++			else
++			{
++				return I2C_TEST_BUSY;
++			}
++		}
++	}
++	else
++	{
++		if (i2c_bus->multi_master)
++		{
++			return I2C_TEST_BUS_AVAILABLE_M;
++		}
++		else
++		{
++			return I2C_TEST_BUS_AVAILABLE;
++		}
++	}
++}
+ #ifdef CONFIG_I2C_SLAVE
+ static void aspeed_i2c_slave_packet_irq(struct aspeed_new_i2c_bus *i2c_bus, u32 sts)
+ {
+@@ -1320,6 +1365,7 @@
+ 		int ret;
+ 
+ 		ret = aspeed_new_i2c_recover_bus(i2c_bus);
++		adap->i2clinkstatus = TmpI2CLinkStatus;
+ 		if (ret)
+ 			return ret;
+ 	}
+@@ -1335,6 +1381,7 @@
+ 	if (timeout == 0) {
+ 		int isr = readl(i2c_bus->reg_base + AST_I2CM_ISR);
+ 		i2c_bus->cmd_err = -ENXIO;
++		adap->i2clinkstatus = I2C_BUS_FAILURE;
+ 		dev_dbg(i2c_bus->dev, "timeout isr[%x], sts[%x]\n", isr,
+ 					readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF));
+ 		if (isr || (readl(i2c_bus->reg_base + AST_I2CC_STS_AND_BUFF) & AST_I2CC_TX_DIR_MASK)) {
+@@ -1626,6 +1677,7 @@
+ 	i2c_bus->adap.dev.parent = i2c_bus->dev;
+ 	i2c_bus->adap.dev.of_node = pdev->dev.of_node;
+ 	i2c_bus->adap.algo_data = i2c_bus;
++	i2c_bus->adap.i2clinkstatus = I2C_LINK_NO_FAILURE;
+ 	strscpy(i2c_bus->adap.name, pdev->name, sizeof(i2c_bus->adap.name));
+ 	i2c_set_adapdata(&i2c_bus->adap, i2c_bus);
+ 
+@@ -1669,6 +1721,29 @@
+ 	return ret;
+ }
+ 
++void rst_i2c_bus(struct i2c_client *client)
++{
++	struct aspeed_new_i2c_bus *i2c_bus = i2c_get_adapdata(client->adapter);
++	
++	struct platform_device *pdev = to_platform_device(i2c_bus->dev);
++	u32 fun_ctrl = AST_I2CC_BUS_AUTO_RELEASE | AST_I2CC_MASTER_EN | AST_I2CC_SLAVE_EN;
++
++	/* I2C Reset */
++	writel(0, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++
++	if (of_property_read_bool(pdev->dev.of_node, "multi-master"))
++		i2c_bus->multi_master = true;
++	else
++		fun_ctrl |= AST_I2CC_MULTI_MASTER_DIS;
++
++	/* Enable Master/Slave Mode */
++	writel(fun_ctrl, i2c_bus->reg_base + AST_I2CC_FUN_CTRL);
++	/* Set AC Timing */
++	writel(aspeed_select_i2c_clock(i2c_bus), i2c_bus->reg_base + AST_I2CC_AC_TIMING);
++
++	/* Clear Interrupt */
++	writel(0xfffffff, i2c_bus->reg_base + AST_I2CM_ISR);
++}
+ static int aspeed_new_i2c_remove(struct platform_device *pdev)
+ {
+ 	struct aspeed_new_i2c_bus *i2c_bus = platform_get_drvdata(pdev);
+diff -ruNa linux/drivers/i2c/i2c-core-base.c linux_n/drivers/i2c/i2c-core-base.c
+--- linux/drivers/i2c/i2c-core-base.c	2022-03-21 18:59:40.873086000 +0800
++++ linux_n/drivers/i2c/i2c-core-base.c	2022-03-25 12:06:13.922962886 +0800
+@@ -2016,7 +2016,11 @@
+ 				trace_i2c_reply(adap, &msgs[i], i);
+ 		trace_i2c_result(adap, num, ret);
+ 	}
+-
++	
++	if(ret == (-ENXIO))
++	{
++		adap->i2clinkstatus = I2C_BUS_FAILURE;
++	}
+ 	return ret;
+ }
+ EXPORT_SYMBOL(__i2c_transfer);
+@@ -2458,6 +2462,9 @@
+ /* AMI Extended IOCTLS */
+ int i2c_ioctl(struct i2c_adapter * adap,unsigned long cmd, unsigned long arg)
+ {
++	unsigned long tmpVal = 0;
++	unsigned long *tmp = (unsigned long *) arg;
++	int ret = 0;
+ 	switch (cmd)
+ 	{
+ 		case I2C_SLAVEREAD:
+@@ -2486,7 +2493,14 @@
+ 				return ret;
+ 			}
+ 			break;
+-
++		case I2C_GET_LINK_STATE:
++			copy_to_user(tmp, &adap->i2clinkstatus, sizeof(adap->i2clinkstatus));
++			return ret;
++		case I2C_BUS_TEST:
++			ret = copy_from_user(&tmpVal,&tmp[0],sizeof(tmpVal));
++			tmpVal = test_i2c_bus(adap, tmpVal);
++			ret = copy_to_user(&tmp[1],&tmpVal,sizeof(tmpVal));
++			return ret;
+ 		case SMBUS_HOST_NOTIFY:
+ 			if (adap->algo->smb_slave_recv)
+ 			{
+diff -ruNa linux/drivers/i2c/i2c-dev.c linux_n/drivers/i2c/i2c-dev.c
+--- linux/drivers/i2c/i2c-dev.c	2022-03-21 18:59:40.841070000 +0800
++++ linux_n/drivers/i2c/i2c-dev.c	2022-03-25 12:06:43.826962351 +0800
+@@ -184,7 +184,6 @@
+ static int i2cdev_check(struct device *dev, void *addrp)
+ {
+ 	struct i2c_client *client = i2c_verify_client(dev);
+-
+ 	if (!client || client->addr != *(unsigned int *)addrp)
+ 		return 0;
+ 
+@@ -228,11 +227,9 @@
+ 
+ 	if (parent)
+ 		result = i2cdev_check_mux_parents(parent, addr);
+-
+ 	if (!result)
+ 		result = device_for_each_child(&adapter->dev, &addr,
+ 						i2cdev_check_mux_children);
+-
+ 	return result;
+ }
+ 
+@@ -397,7 +394,8 @@
+ {
+ 	struct i2c_client *client = file->private_data;
+ 	unsigned long funcs;
+-
++	unsigned long *tmp ,tmpVal = 0;
++	int ret = 0;
+ 	dev_dbg(&client->adapter->dev, "ioctl, cmd=0x%02x, arg=0x%02lx\n",
+ 		cmd, arg);
+ 
+@@ -496,6 +494,11 @@
+       g_enable_mux_disconnect[MuxCtrlFlag.RootBusNum] = (MuxCtrlFlag.State)?TRUE:FALSE;
+ 		return 0;
+ 	}
++	case I2C_RESET:
++	{
++		rst_i2c_bus(client);
++		return 0;
++	}
+ 	default:
+        /* Call the core ioctl (AMI extended)functions */
+         return i2c_ioctl(client->adapter,cmd,arg);
+diff -ruNa linux/include/linux/i2c.h linux_n/include/linux/i2c.h
+--- linux/include/linux/i2c.h	2022-03-21 18:59:40.845072000 +0800
++++ linux_n/include/linux/i2c.h	2022-03-25 13:11:40.462892697 +0800
+@@ -24,7 +24,25 @@
+ 
+ #define MAX_IPMB_MSG_SIZE  128
+ #define MAX_I2C_ADAPTERS   16
++/*
++* I2C BUS states 
++*/
+ 
++#define I2C_LINK_NO_FAILURE						0x00  //
++#define I2C_UNABLE_DRIVE_CLK_HIGH				0x01  //
++#define I2C_UNABLE_DRIVE_DATA_HIGH				0x02  //
++#define I2C_UNABLE_DRIVE_CLK_LOW				0x03
++#define I2C_UNABLE_DRIVE_DATA_LOW				0x04
++#define I2C_CLOCK_LOW_TIMEOUT_CLK_HIGH			0x05   
++#define I2C_UNDER_RCV    							0x06  //  
++#define I2C_UNDIAGNOSED_COMM_FAILURE			0x07  // 
++#define I2C_BUS_FAILURE                      0x08  // i2c bus is abnormal, or the device is not on the bus.
++#define I2C_TEST_BUSY                        0x0A // in the single master, I2C bus is busy
++#define I2C_TEST_BUS_AVAILABLE               0x0B // in the single master, I2C bus is available
++#define I2C_TEST_BUSY_M                      0x0C // in the multi-masters, I2C bus is busy. there might be another master sending data
++#define I2C_TEST_BUS_AVAILABLE_M             0x0D // in the multi-master, I2C bus is available
++#define I2C_TEST_RECVOERY_OK                 0x0E // in the single master, the bus can be recoveried.
++#define I2C_TEST_RECOVERY_FAILED             0x0F // in the single master, the bus cannot be recoveried.
+ 
+ extern struct bus_type i2c_bus_type;
+ extern struct device_type i2c_adapter_type;
+@@ -719,7 +737,7 @@
+ 	const struct i2c_lock_operations *lock_ops;
+ 	struct rt_mutex bus_lock;
+ 	struct rt_mutex mux_lock;
+-
++	int i2clinkstatus;
+ 	int timeout;			/* in jiffies */
+ 	int retries;
+ 	struct device dev;		/* the adapter device */
+@@ -882,7 +900,6 @@
+ extern struct i2c_adapter *i2c_get_adapter(int nr);
+ extern void i2c_put_adapter(struct i2c_adapter *adap);
+ extern unsigned int i2c_adapter_depth(struct i2c_adapter *adapter);
+-
+ void i2c_parse_fw_timings(struct device *dev, struct i2c_timings *t, bool use_defaults);
+ 
+ /* Return the functionality mask */
+@@ -960,7 +977,8 @@
+ 
+ /* must call i2c_put_adapter() when done with returned i2c_adapter device */
+ struct i2c_adapter *of_get_i2c_adapter_by_node(struct device_node *node);
+-
++int test_i2c_bus(struct i2c_adapter *adap, int rcv);
++void rst_i2c_bus(struct i2c_client *client);
+ extern const struct of_device_id
+ *i2c_of_match_device(const struct of_device_id *matches,
+ 		     struct i2c_client *client);
+diff -ruNa linux/include/uapi/linux/i2c-dev.h linux_n/include/uapi/linux/i2c-dev.h
+--- linux/include/uapi/linux/i2c-dev.h	2022-03-21 18:59:40.845072000 +0800
++++ linux_n/include/uapi/linux/i2c-dev.h	2022-03-25 12:04:49.310964398 +0800
+@@ -73,6 +73,7 @@
+ 
+ 
+ 
++
+ /* This is the structure as used in the I2C_SMBUS ioctl call */
+ struct i2c_smbus_ioctl_data {
+ 	__u8 read_write;

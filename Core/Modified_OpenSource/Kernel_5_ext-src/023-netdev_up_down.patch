@@ -1,0 +1,147 @@
+--- linux-5.4.85/drivers/net/bonding/bond_main.c	2021-04-15 16:08:32.501968839 +0800
++++ linux-5.4.85-new/drivers/net/bonding/bond_main.c	2021-04-19 16:52:16.347189273 +0800
+@@ -347,6 +347,15 @@
+ 	bond_for_each_slave(bond, slave, iter) {
+ 		if (slave->link == BOND_LINK_UP) {
+ 			if (!netif_carrier_ok(bond->dev)) {
++               if (rtnl_trylock())
++                {
++                   netdev_link_up(bond->dev);
++                   rtnl_unlock();
++                }
++                else
++                {
++                   netdev_link_up(bond->dev);
++                }
+ 				netif_carrier_on(bond->dev);
+ 				return 1;
+ 			}
+@@ -356,6 +365,15 @@
+ 
+ down:
+ 	if (netif_carrier_ok(bond->dev)) {
++       	if (rtnl_trylock())
++        {
++            netdev_link_down(bond->dev);
++            rtnl_unlock();
++        }
++        else
++        {
++            netdev_link_down(bond->dev);
++        }
+ 		netif_carrier_off(bond->dev);
+ 		return 1;
+ 	}
+@@ -876,6 +894,15 @@
+ 			bond_set_slave_inactive_flags(old_active,
+ 						      BOND_SLAVE_NOTIFY_NOW);
+ 
++		if (rtnl_trylock())
++        {
++            netdev_link_down(bond->dev);
++            rtnl_unlock();
++        }
++        else
++        {
++            netdev_link_down(bond->dev);
++        }
+ 		if (new_active) {
+ 			bool should_notify_peers = false;
+ 
+@@ -894,6 +921,15 @@
+ 					bond_should_notify_peers(bond);
+ 			}
+ 
++			if (rtnl_trylock())
++            {
++                netdev_link_up(bond->dev);
++                rtnl_unlock();
++            }
++            else
++            {
++                netdev_link_up(bond->dev);
++            }
+ 			call_netdevice_notifiers(NETDEV_BONDING_FAILOVER, bond->dev);
+ 			if (should_notify_peers) {
+ 				bond->send_peer_notif--;
+--- linux-5.4.85/drivers/net/phy/phy.c	2021-04-15 16:08:34.941919822 +0800
++++ linux-5.4.85-new/drivers/net/phy/phy.c	2021-04-19 16:52:36.246739544 +0800
+@@ -16,6 +16,7 @@
+ #include <linux/delay.h>
+ #include <linux/netdevice.h>
+ #include <linux/etherdevice.h>
++#include <linux/rtnetlink.h>
+ #include <linux/skbuff.h>
+ #include <linux/mm.h>
+ #include <linux/module.h>
+@@ -102,6 +103,21 @@
+ 	} else	{
+ 		netdev_info(phydev->attached_dev, "Link is Down\n");
+ 	}
++	if (rtnl_trylock())
++	{
++		if (phydev->link) 
++       		netdev_link_up(phydev->attached_dev);
++		else
++       		netdev_link_down(phydev->attached_dev);
++		rtnl_unlock();
++	}
++    else
++	{
++		if (phydev->link)
++            netdev_link_up(phydev->attached_dev);
++        else
++            netdev_link_down(phydev->attached_dev);
++	}
+ }
+ EXPORT_SYMBOL(phy_print_status);
+ 
+--- linux-5.4.85/include/linux/netdevice.h	2021-04-15 16:08:57.721461861 +0800
++++ linux-5.4.85-new/include/linux/netdevice.h	2021-04-19 16:53:23.385674766 +0800
+@@ -2489,6 +2489,8 @@
+ 	NETDEV_CVLAN_FILTER_DROP_INFO,
+ 	NETDEV_SVLAN_FILTER_PUSH_INFO,
+ 	NETDEV_SVLAN_FILTER_DROP_INFO,
++ 	NETDEV_LINK_UP,  	/* Link up Notifier   */
++	NETDEV_LINK_DOWN    /* Link down Notifier */
+ };
+ const char *netdev_cmd_to_name(enum netdev_cmd cmd);
+ 
+@@ -4231,6 +4233,8 @@
+ void netdev_state_change(struct net_device *dev);
+ void netdev_notify_peers(struct net_device *dev);
+ void netdev_features_change(struct net_device *dev);
++void netdev_link_up(struct net_device *dev);
++void netdev_link_down(struct net_device *dev);
+ /* Load a device via the kmod */
+ void dev_load(struct net *net, const char *name);
+ struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
+--- linux-5.4.85/net/core/dev.c	2021-04-15 16:09:03.733340900 +0800
++++ linux-5.4.85-new/net/core/dev.c	2021-04-19 16:54:21.536362290 +0800
+@@ -1514,7 +1514,7 @@
+ 	N(UDP_TUNNEL_DROP_INFO) N(CHANGE_TX_QUEUE_LEN)
+ 	N(CVLAN_FILTER_PUSH_INFO) N(CVLAN_FILTER_DROP_INFO)
+ 	N(SVLAN_FILTER_PUSH_INFO) N(SVLAN_FILTER_DROP_INFO)
+-	N(PRE_CHANGEADDR)
++	N(PRE_CHANGEADDR) N(LINK_UP) N(LINK_DOWN)
+ 	}
+ #undef N
+ 	return "UNKNOWN_NETDEV_EVENT";
+@@ -10246,4 +10246,17 @@
+ 	return rc;
+ }
+ 
++
++void netdev_link_up(struct net_device *dev)
++{
++   call_netdevice_notifiers(NETDEV_LINK_UP, dev);
++}
++EXPORT_SYMBOL(netdev_link_up);
++
++void netdev_link_down(struct net_device *dev)
++{
++   call_netdevice_notifiers(NETDEV_LINK_DOWN, dev);
++}
++EXPORT_SYMBOL(netdev_link_down);
++
+ subsys_initcall(net_dev_init);

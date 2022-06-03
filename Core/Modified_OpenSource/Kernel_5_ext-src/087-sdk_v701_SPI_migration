@@ -1,0 +1,140 @@
+diff -Naur linux_old/drivers/mtd/spi-nor/spi-nor.c linux/drivers/mtd/spi-nor/spi-nor.c
+--- linux_old/drivers/mtd/spi-nor/spi-nor.c	2021-09-07 16:20:04.499861597 +0800
++++ linux/drivers/mtd/spi-nor/spi-nor.c	2021-09-07 16:30:19.519875146 +0800
+@@ -1914,6 +1914,36 @@
+ 	return nor->read_reg(nor, SPINOR_OP_RDSR2, sr2, 1);
+ }
+ 
++static int spi_nor_winbond_read_sr2(struct spi_nor *nor, u8 *sr2)
++{
++	if (nor->spimem) {
++		struct spi_mem_op op =
++			SPI_MEM_OP(SPI_MEM_OP_CMD(SPINOR_OP_WINBOND_RDSR2, 1),
++				   SPI_MEM_OP_NO_ADDR,
++				   SPI_MEM_OP_NO_DUMMY,
++				   SPI_MEM_OP_DATA_IN(1, sr2, 1));
++
++		return spi_mem_exec_op(nor->spimem, &op);
++	}
++
++	return nor->read_reg(nor, SPINOR_OP_WINBOND_RDSR2, sr2, 1);
++}
++
++static int spi_nor_winbond_write_sr2(struct spi_nor *nor, u8 *sr2)
++{
++	if (nor->spimem) {
++		struct spi_mem_op op =
++			SPI_MEM_OP(SPI_MEM_OP_CMD(SPINOR_OP_WINBOND_WRSR2, 1),
++				   SPI_MEM_OP_NO_ADDR,
++				   SPI_MEM_OP_NO_DUMMY,
++				   SPI_MEM_OP_DATA_OUT(1, sr2, 1));
++
++		return spi_mem_exec_op(nor->spimem, &op);
++	}
++
++	return nor->write_reg(nor, SPINOR_OP_WINBOND_WRSR2, sr2, 1);
++}
++
+ /**
+  * sr2_bit7_quad_enable() - set QE bit in Status Register 2.
+  * @nor:	pointer to a 'struct spi_nor'
+@@ -1957,7 +1987,54 @@
+ 
+ 	/* Read back and check it. */
+ 	ret = spi_nor_read_sr2(nor, sr2);
+-	if (!(ret > 0 && (*sr2 & SR2_QUAD_EN_BIT7))) {
++	if (ret || !(*sr2 & SR2_QUAD_EN_BIT7)) {
++		dev_err(nor->dev, "SR2 Quad bit not set\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++/**
++ * sr2_bit1_quad_enable() - set QE bit in Status Register 2.
++ * @nor:	pointer to a 'struct spi_nor'
++ *
++ * Set the Quad Enable (QE) bit in the Status Register 2.
++ *
++ * Return: 0 on success, -errno otherwise.
++ */
++static int winbond_sr2_bit1_quad_enable(struct spi_nor *nor)
++{
++	u8 *sr2 = nor->bouncebuf;
++	int ret;
++
++	/* Check current Quad Enable bit value. */
++	ret = spi_nor_winbond_read_sr2(nor, sr2);
++	if (ret)
++		return ret;
++	if (*sr2 & SR2_QUAD_EN_BIT1)
++		return 0;
++
++	/* Update the Quad Enable bit. */
++	*sr2 |= SR2_QUAD_EN_BIT1;
++
++	write_enable(nor);
++
++	ret = spi_nor_winbond_write_sr2(nor, sr2);
++	if (ret < 0) {
++		dev_err(nor->dev, "error while writing status register 2\n");
++		return -EINVAL;
++	}
++
++	ret = spi_nor_wait_till_ready(nor);
++	if (ret < 0) {
++		dev_err(nor->dev, "timeout while writing status register 2\n");
++		return ret;
++	}
++
++	/* Read back and check it. */
++	ret = spi_nor_winbond_read_sr2(nor, sr2);
++	if (ret || !(*sr2 & SR2_QUAD_EN_BIT1)) {
+ 		dev_err(nor->dev, "SR2 Quad bit not set\n");
+ 		return -EINVAL;
+ 	}
+@@ -2156,7 +2233,7 @@
+ 	.post_bfpt = mx25l25635_post_bfpt_fixups,
+ };
+ 
+-static void gd25q256_default_init(struct spi_nor *nor)
++static void gd25q256_post_sfdp(struct spi_nor *nor)
+ {
+ 	/*
+ 	 * Some manufacturer like GigaDevice may use different
+@@ -2164,11 +2241,11 @@
+ 	 * indicate the quad_enable method for this case, we need
+ 	 * to set it in the default_init fixup hook.
+ 	 */
+-	nor->params.quad_enable = macronix_quad_enable;
++	nor->params.quad_enable = winbond_sr2_bit1_quad_enable;
+ }
+ 
+ static struct spi_nor_fixups gd25q256_fixups = {
+-	.default_init = gd25q256_default_init,
++	.post_sfdp = gd25q256_post_sfdp,
+ };
+ 
+ /* NOTE: double check command sets and memory organization when you add
+--- linux_old/include/linux/mtd/spi-nor.h	2021-09-07 16:22:15.715864488 +0800
++++ linux/include/linux/mtd/spi-nor.h	2021-09-07 16:33:03.263878753 +0800
+@@ -113,6 +113,10 @@
+ #define SPINOR_OP_EN4B		0xb7	/* Enter 4-byte mode */
+ #define SPINOR_OP_EX4B		0xe9	/* Exit 4-byte mode */
+ 
++/* Used for Winbond gigadevice flashes. */
++#define SPINOR_OP_WINBOND_RDSR2	0x35 /* Read status register 2 */
++#define SPINOR_OP_WINBOND_WRSR2	0x31 /* Write status register 2 */
++
+ /* Used for Spansion flashes only. */
+ #define SPINOR_OP_BRWR		0x17	/* Bank register write */
+ #define SPINOR_OP_CLSR		0x30	/* Clear status register 1 */
+@@ -164,6 +168,7 @@
+ 
+ /* Status Register 2 bits. */
+ #define SR2_QUAD_EN_BIT7	BIT(7)
++#define SR2_QUAD_EN_BIT1	BIT(1)
+ 
+ /* Supported SPI protocols */
+ #define SNOR_PROTO_INST_MASK	GENMASK(23, 16)

@@ -249,8 +249,9 @@ static struct ctl_table HelperTable[] =
 #endif
 };
 
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined(CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 extern unsigned char broken_spi_banks;// specify the number of broken SPI flash bank
+extern unsigned long spi_bank_size;// specify the flash size
 #endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36))
@@ -334,7 +335,10 @@ init_helper(void)
 	FlashSectorSize = CONFIG_SPX_FEATURE_GLOBAL_ERASE_BLOCK_SIZE;
 	UsedFlashStart 	= CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_START;
 	UsedFlashSize	= CONFIG_SPX_FEATURE_GLOBAL_USED_FLASH_SIZE;
-	
+
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
+	FlashSize=spi_bank_size;
+#endif
 	if(GetCurrentRunningImage()==2){
 #ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
 		EnvStart+=get_secondaryimage_offset();
@@ -346,13 +350,13 @@ init_helper(void)
 	fwinfo_proc = AddProcEntry(moduledir,"FwInfo",fwinfo_read,NULL,NULL);
 
 #ifdef CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	if (broken_spi_banks != 1)
 #endif
 	{
 		fwinfo1_proc = AddProcEntry(moduledir,"FwInfo1",fwinfo1_read,NULL,NULL);
 	}
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	if (broken_spi_banks != 2)
 #endif
 	{
@@ -379,13 +383,13 @@ exit_helper(void)
 	RemoveProcEntry(fwinfo_proc);
     RemoveProcEntry(fbinfo_proc);
 #ifdef CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	if (broken_spi_banks != 1)
 #endif
 	{
 		RemoveProcEntry(fwinfo1_proc);
 	}
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined (CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	if (broken_spi_banks != 2)
 #endif
 	{
@@ -398,13 +402,13 @@ exit_helper(void)
 	RemoveProcEntry(moduledir,"FwInfo");
     RemoveProcEntry(moduledir,"FbInfo");
 #ifdef CONFIG_SPX_FEATURE_GLOBAL_DUAL_IMAGE_SUPPORT
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	if (broken_spi_banks != 1)
 #endif
 	{
 		RemoveProcEntry(moduledir,"FwInfo1");
 	}
-#ifdef CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT
+#if defined(CONFIG_SPX_FEATURE_HW_FAILSAFE_BOOT) && defined (CONFIG_SPX_FEATURE_DEDICATED_SPI_FLASH_BANK)
 	if (broken_spi_banks != 2)
 #endif
 	{

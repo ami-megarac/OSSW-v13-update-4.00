@@ -1,0 +1,32 @@
+diff -Naur linux/drivers/gpu/drm/aspeed/aspeed_gfx_drv.c linux_new/drivers/gpu/drm/aspeed/aspeed_gfx_drv.c
+--- linux/drivers/gpu/drm/aspeed/aspeed_gfx_drv.c	2021-06-11 18:13:12.097015082 +0530
++++ linux_new/drivers/gpu/drm/aspeed/aspeed_gfx_drv.c	2021-06-11 18:16:32.278452291 +0530
+@@ -117,6 +117,7 @@
+ 	struct aspeed_gfx *priv;
+ 	struct resource *res;
+ 	int ret;
++	u32 ctrl;
+ 
+ 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+ 	if (!priv)
+@@ -179,9 +180,18 @@
+ 	}
+ 	clk_prepare_enable(priv->clk);
+ 
++	regmap_read(priv->scu,0xc0,&ctrl);
++
+ 	/* Sanitize control registers */
+-	writel(0, priv->base + CRT_CTRL1);
+-	writel(0, priv->base + CRT_CTRL2);
++	if(ctrl != 0x11000)
++        {
++		writel(0, priv->base + CRT_CTRL1);
++		writel(0, priv->base + CRT_CTRL2);
++	}
++	else
++	{
++		printk("FrameBuffer is enabled.Skipping Sanitize control registers... \n");
++	}
+ 
+ 	aspeed_gfx_setup_mode_config(drm);
+ 
