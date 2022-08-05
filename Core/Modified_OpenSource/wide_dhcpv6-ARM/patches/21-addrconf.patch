@@ -1,0 +1,12 @@
+diff -Naur wide-dhcpv6-20080615_orig/addrconf.c wide-dhcpv6-20080615_new/addrconf.c
+--- wide-dhcpv6-20080615_orig/addrconf.c	2020-03-18 14:54:27.672354000 +0800
++++ wide-dhcpv6-20080615_new/addrconf.c	2020-03-18 11:02:46.000000000 +0800
+@@ -395,7 +395,7 @@
+ 	sin6.sin6_addr = addr->addr;
+ 
+ 	if (ipv6_prefix_length == 0) {
+-		return (ifaddrconf(cmd, sa->dhcpif->ifname, &sin6, 128, addr->pltime, addr->vltime));
++		return (ifaddrconf(cmd, sa->dhcpif->ifname, &sin6, 64, addr->pltime, addr->vltime));
+ 	} else {
+ 		return (ifaddrconf(cmd, sa->dhcpif->ifname, &sin6, ipv6_prefix_length, addr->pltime, addr->vltime));
+ 	}
